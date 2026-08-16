@@ -94,6 +94,19 @@ func RegisterMedia(reg *Registry, env MediaEnv) {
 			"required": ["rationale"]
 		}`),
 	), env.runFFmpeg)
+
+	reg.Register(llm.NewFunctionTool(
+		"analyze_video_frames",
+		"Adaptively sample frames from a video for visual analysis. Detects scene boundaries using FFmpeg, computes a motion score per scene, and extracts a representative set of frames (default max 250). Returns a manifest of extracted frame paths, scene IDs, timestamps, and motion scores so downstream tools or vision models can analyse the content.",
+		json.RawMessage(`{
+			"type": "object",
+			"properties": {
+				"path": {"type": "string", "description": "Workspace-relative path to the video file, e.g. media/talk.mp4"},
+				"max_frames": {"type": "integer", "description": "Maximum total frames to extract across all scenes. Default 250, max 500."}
+			},
+			"required": ["path"]
+		}`),
+	), env.analyzeVideoFrames)
 }
 
 func (e MediaEnv) listWorkspace(_ context.Context, raw json.RawMessage) Result {
@@ -471,5 +484,29 @@ func trimOutput(s string, n int) string {
 	if len(s) <= n {
 		return s
 	}
-	return s[:n] + fmt.Sprintf("\n… truncated %d bytes …", len(s)-n)
+	return s[:n] + fmt.Sprintf("\n\u2026 truncated %d bytes \u2026", len(s)-n)
+}
+
+func (e MediaEnv) analyzeVideoFrames(ctx context.Context, raw json.RawMessage) Result {
+	var body struct {
+		Path      string `json:"path"`
+		MaxFrames int    `json:"max_frames"`
+	}
+	if err := json.Unmarshal(raw, &body); err != nil {
+		return Result{OK: false, Error: err.Error()}
+	}
+	if strings.TrimSpace(body.Path) == "" {
+		return Result{OK: false, Error: "path is required"}
+	}
+	if body.MaxFrames < 1 {
+		body.MaxFrames = 250
+	}
+	if body.MaxFrames > 500 {
+		body.MaxFrames = 500
+	}
+	manifest, err := ffmpeg.AnalyzeVideoFrames(ctx, e.Bins, body.Path, e.Workspace, body.MaxFrames)
+	if err != nil {
+		return Result{OK: false, Error: err.Error()}
+	}
+	return Result{OK: true, Output: manifest}
 }

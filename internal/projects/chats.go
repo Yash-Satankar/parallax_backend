@@ -294,7 +294,11 @@ func writeChatIndex(p Project, idx chatIndex) error {
 	if err := os.WriteFile(tmp, b, 0o600); err != nil {
 		return err
 	}
-	return os.Rename(tmp, chatIndexPath(p))
+	if err := os.Rename(tmp, chatIndexPath(p)); err != nil {
+		_ = os.Remove(chatIndexPath(p))
+		return os.Rename(tmp, chatIndexPath(p))
+	}
+	return nil
 }
 
 func upsertChatMeta(p Project, meta ChatMeta) error {
@@ -352,7 +356,11 @@ func writeChat(p Project, chat Chat) error {
 	if err := os.WriteFile(tmp, b, 0o600); err != nil {
 		return err
 	}
-	return os.Rename(tmp, chatPath(p, chat.ID))
+	if err := os.Rename(tmp, chatPath(p, chat.ID)); err != nil {
+		_ = os.Remove(chatPath(p, chat.ID))
+		return os.Rename(tmp, chatPath(p, chat.ID))
+	}
+	return nil
 }
 
 func chatTitle(current string, msgs []llm.Message) string {

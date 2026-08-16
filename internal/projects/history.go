@@ -161,7 +161,10 @@ func writeBytesAtomic(path string, value []byte, mode os.FileMode) error {
 		return err
 	}
 	if err := os.Rename(name, path); err != nil {
-		return err
+		_ = os.Remove(path)
+		if err := os.Rename(name, path); err != nil {
+			return err
+		}
 	}
 	ok = true
 	return nil

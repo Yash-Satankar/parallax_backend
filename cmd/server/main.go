@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"parallax/internal/agent"
+	"parallax/internal/collab"
 	"parallax/internal/config"
 	"parallax/internal/ffmpeg"
 	"parallax/internal/httpapi"
@@ -57,6 +58,7 @@ func main() {
 			FFprobe: cfg.FFprobeBin,
 		},
 		Projects:  projectStore,
+		CollabHub: collab.NewHub(projectStore, log),
 		MaxIters:  cfg.MaxIters,
 		Logger:    log,
 		Workspace: cfg.WorkspaceDir,

@@ -51,10 +51,23 @@ func (a *Agent) log() *slog.Logger {
 }
 
 // Run drives the loop and reports every step through emit.
-func (a *Agent) Run(ctx context.Context, in Input, emit Sink) Outcome {
+func (a *Agent) Run(ctx context.Context, in Input, emit Sink) (outcome Outcome) {
 	if emit == nil {
 		emit = func(Event) {}
 	}
+	defer func() {
+		if rec := recover(); rec != nil {
+			a.log().Error("agent run panic", "session", in.SessionID, "err", rec)
+			emit(NewEvent(EventError, ErrorPayload{Message: fmt.Sprintf("agent error: %v", rec)}))
+			emit(NewEvent(EventDone, DonePayload{Reason: "error", SessionID: in.SessionID}))
+			outcome = Outcome{
+				SessionID: in.SessionID,
+				Messages:  in.Messages,
+				Reason:    "error",
+			}
+		}
+	}()
+
 	if a.Provider == nil {
 		emit(NewEvent(EventError, ErrorPayload{Message: "no LLM provider configured"}))
 		return Outcome{SessionID: in.SessionID, Messages: in.Messages, Reason: "error"}
@@ -148,6 +161,33 @@ func (a *Agent) Run(ctx context.Context, in Input, emit Sink) Outcome {
 			}))
 
 			res := a.Tools.Execute(ctx, call.Function.Name, call.Function.Arguments)
+
+			// Check for human-in-the-loop pause (image generation candidate selection).
+			if res.OK {
+				if m, ok := res.Output.(map[string]any); ok {
+					if status, _ := m["status"].(string); status == "awaiting_user_selection" {
+						candidates, _ := m["candidates"].([]string)
+						contentURLs, _ := m["content_urls"].([]string)
+						expiresAt, _ := m["expires_at"].(string)
+						emit(NewEvent(EventSelectionRequired, SelectionRequiredPayload{
+							ToolCallID:  call.ID,
+							ToolName:    call.Function.Name,
+							Candidates:  candidates,
+							ContentURLs: contentURLs,
+							ExpiresAt:   expiresAt,
+						}))
+						// Append the assistant message with the tool call, but NOT a
+						// tool result — the result will be injected when the user selects.
+						return Outcome{
+							SessionID:  in.SessionID,
+							Messages:   messages,
+							Iterations: i,
+							Reason:     "awaiting_user_selection",
+						}
+					}
+				}
+			}
+
 			emit(NewEvent(EventToolResult, ToolResultPayload{
 				ID:        call.ID,
 				Name:      call.Function.Name,

@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"parallax/internal/collab"
 	"parallax/internal/ffmpeg"
 	"parallax/internal/llm"
 	"parallax/internal/projects"
@@ -18,6 +19,7 @@ type TimelineEnv struct {
 	ProjectID   string
 	Workspace   string
 	Bins        ffmpeg.Bins
+	CollabHub   *collab.Hub // optional; nil disables live broadcast
 }
 
 func RegisterTimeline(reg *Registry, env TimelineEnv) {
@@ -187,6 +189,21 @@ func (e TimelineEnv) applyOps(ops []projects.TimelineOperation, note string) Res
 	if id, frame := focusTarget(result); id != "" {
 		e.Transaction.Focus(id, frame)
 		result.Timeline = e.Transaction.Get()
+	}
+	// Broadcast changes to collaborative clients.
+	if e.CollabHub != nil && e.ProjectID != "" {
+		clipByID := make(map[string]projects.TimelineClip, len(result.Timeline.Clips))
+		for _, c := range result.Timeline.Clips {
+			clipByID[c.ID] = c
+		}
+		for _, id := range result.CreatedIDs {
+			if clip, ok := clipByID[id]; ok {
+				e.CollabHub.PublishClipInsert(e.ProjectID, clip, collab.KeyBetween("", ""))
+			}
+		}
+		for _, id := range result.RemovedIDs {
+			e.CollabHub.PublishClipDelete(e.ProjectID, id)
+		}
 	}
 	return Result{OK: true, Output: map[string]any{
 		"timeline": result.Timeline, "created_ids": result.CreatedIDs, "removed_ids": result.RemovedIDs,

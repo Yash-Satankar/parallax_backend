@@ -68,7 +68,17 @@ func (r *Registry) Specs() []llm.ToolSpec {
 	return out
 }
 
-func (r *Registry) Execute(ctx context.Context, name, arguments string) Result {
+func (r *Registry) Execute(ctx context.Context, name, arguments string) (res Result) {
+	defer func() {
+		if rec := recover(); rec != nil {
+			res = Result{
+				OK:    false,
+				Name:  name,
+				Error: fmt.Sprintf("tool panic: %v", rec),
+			}
+		}
+	}()
+
 	r.mu.RLock()
 	item, ok := r.items[name]
 	r.mu.RUnlock()
@@ -85,7 +95,7 @@ func (r *Registry) Execute(ctx context.Context, name, arguments string) Result {
 	}
 
 	start := time.Now()
-	res := item.handler(ctx, raw)
+	res = item.handler(ctx, raw)
 	res.Name = name
 	res.Elapsed = time.Since(start)
 	return res

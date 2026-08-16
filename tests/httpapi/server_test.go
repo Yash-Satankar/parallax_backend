@@ -12,8 +12,11 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/gorilla/websocket"
 	"parallax/internal/agent"
+	"parallax/internal/collab"
 	"parallax/internal/config"
 	. "parallax/internal/httpapi"
 	"parallax/internal/llm"
@@ -671,3 +674,55 @@ func TestChatRequiresMessage(t *testing.T) {
 		t.Fatalf("status=%d", resp.StatusCode)
 	}
 }
+
+func TestCollabEndpoint(t *testing.T) {
+	s := testServer(t, fakeProvider{})
+	ts := httptest.NewServer(s.Handler())
+	defer ts.Close()
+
+	// 1. When CollabHub is nil, should return 503
+	resp, err := http.Get(ts.URL + "/v1/projects/any-id/collab")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503 when CollabHub is nil, got %d", resp.StatusCode)
+	}
+
+	// Attach CollabHub
+	s.CollabHub = collab.NewHub(s.Projects, nil)
+
+	// 2. When project does not exist, should return 404
+	resp2, err := http.Get(ts.URL + "/v1/projects/missing-id/collab")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp2.Body.Close()
+	if resp2.StatusCode != http.StatusNotFound {
+		t.Fatalf("expected 404 for missing project, got %d", resp2.StatusCode)
+	}
+
+	// 3. Create project and connect via WebSocket
+	p, err := s.Projects.Create("Collab Project")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	wsURL := "ws" + strings.TrimPrefix(ts.URL, "http") + "/v1/projects/" + p.ID + "/collab"
+	ws, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("failed to dial websocket: %v", err)
+	}
+	// Read initial sync message
+	_, msg, err := ws.ReadMessage()
+	if err != nil {
+		t.Fatalf("failed to read sync message: %v", err)
+	}
+	if !strings.Contains(string(msg), "sync") || !strings.Contains(string(msg), p.ID) {
+		t.Fatalf("expected sync message containing project id, got %s", string(msg))
+	}
+	_ = ws.Close()
+	time.Sleep(100 * time.Millisecond)
+}
+

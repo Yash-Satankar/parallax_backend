@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"parallax/internal/agent"
+	"parallax/internal/collab"
 	"parallax/internal/config"
 	"parallax/internal/ffmpeg"
 	"parallax/internal/llm"
@@ -33,6 +34,7 @@ type Server struct {
 	MaxIters     int
 	Logger       *slog.Logger
 	Workspace    string
+	CollabHub    *collab.Hub
 }
 
 func (s *Server) systemPrompt() string {
@@ -80,8 +82,10 @@ func (s *Server) Handler() http.Handler {
 		mux.HandleFunc("POST /v1/projects/{id}/checkpoints", s.handleCreateCheckpoint)
 		mux.HandleFunc("PATCH /v1/projects/{id}/checkpoints/{checkpoint}", s.handleRenameCheckpoint)
 		mux.HandleFunc("DELETE /v1/projects/{id}/checkpoints/{checkpoint}", s.handleDeleteCheckpoint)
+		// Real-time collaboration WebSocket
+		mux.HandleFunc("GET /v1/projects/{id}/collab", s.handleCollab)
 	}
-	return withCORS(withLog(s.log(), mux))
+	return withCORS(withLog(s.log(), withRecovery(s.log(), mux)))
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
@@ -184,6 +188,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 			ProjectID:   projectID,
 			Workspace:   project.Dir,
 			Bins:        s.Bins,
+			CollabHub:   s.CollabHub,
 		})
 	}
 	if toolRegistry == nil {
@@ -343,3 +348,20 @@ func withLog(log *slog.Logger, next http.Handler) http.Handler {
 		)
 	})
 }
+
+func withRecovery(log *slog.Logger, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer func() {
+			if rec := recover(); rec != nil {
+				log.Error("http handler panic",
+					"method", r.Method,
+					"path", r.URL.Path,
+					"err", rec,
+				)
+				writeError(w, http.StatusInternalServerError, "internal server error")
+			}
+		}()
+		next.ServeHTTP(w, r)
+	})
+}
+

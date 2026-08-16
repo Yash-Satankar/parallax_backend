@@ -300,7 +300,11 @@ func writeTimeline(p Project, doc Timeline) error {
 	if err := os.WriteFile(tmp, b, 0o600); err != nil {
 		return err
 	}
-	return os.Rename(tmp, timelinePath(p))
+	if err := os.Rename(tmp, timelinePath(p)); err != nil {
+		_ = os.Remove(timelinePath(p))
+		return os.Rename(tmp, timelinePath(p))
+	}
+	return nil
 }
 
 func normalizeTimeline(doc Timeline) (Timeline, error) {

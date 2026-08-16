@@ -6,14 +6,15 @@ import "encoding/json"
 type EventType string
 
 const (
-	EventSession        EventType = "session"
-	EventStep           EventType = "step"
-	EventText           EventType = "text"
-	EventToolCall       EventType = "tool_call"
-	EventToolResult     EventType = "tool_result"
-	EventDone           EventType = "done"
-	EventError          EventType = "error"
-	EventProjectChanged EventType = "project_changed"
+	EventSession           EventType = "session"
+	EventStep              EventType = "step"
+	EventText              EventType = "text"
+	EventToolCall          EventType = "tool_call"
+	EventToolResult        EventType = "tool_result"
+	EventDone              EventType = "done"
+	EventError             EventType = "error"
+	EventProjectChanged    EventType = "project_changed"
+	EventSelectionRequired EventType = "selection_required" // agent paused; user must pick a candidate
 )
 
 // Event is one realtime update from the agent loop.
@@ -70,6 +71,14 @@ type DonePayload struct {
 
 type ErrorPayload struct {
 	Message string `json:"message"`
+}
+
+type SelectionRequiredPayload struct {
+	ToolCallID  string   `json:"tool_call_id"`
+	ToolName    string   `json:"tool_name"`
+	Candidates  []string `json:"candidates"`  // workspace-relative paths
+	ContentURLs []string `json:"content_urls"` // public-accessible URLs for preview
+	ExpiresAt   string   `json:"expires_at,omitempty"`
 }
 
 type ProjectChangedPayload struct {
