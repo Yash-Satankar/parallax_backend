@@ -117,7 +117,7 @@ func TestResolveFileRejectsSymlink(t *testing.T) {
 	}
 	link := filepath.Join(p.Dir, "media", "escape.mp4")
 	if err := os.Symlink(outside, link); err != nil {
-		t.Fatal(err)
+		t.Skipf("skipping symlink test (symlink creation not supported/permitted): %v", err)
 	}
 	if _, err := store.ResolveFile(p.ID, "media/escape.mp4"); err == nil {
 		t.Fatal("symlink was served")

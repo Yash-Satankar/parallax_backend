@@ -131,5 +131,5 @@ func restoreMedia(p Project, target, current map[string]string) error {
 
 func safeHistoryMediaPath(rel string) bool {
 	rel = filepath.Clean(filepath.FromSlash(rel))
-	return rel != "." && !filepath.IsAbs(rel) && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && !strings.HasPrefix(rel, ".parallax"+string(filepath.Separator)) && !strings.HasPrefix(rel, "exports"+string(filepath.Separator))
+	return rel != "." && !filepath.IsAbs(rel) && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && !strings.HasPrefix(rel, "/") && !strings.HasPrefix(rel, "\\") && filepath.VolumeName(rel) == "" && !strings.HasPrefix(rel, ".parallax"+string(filepath.Separator)) && !strings.HasPrefix(rel, "exports"+string(filepath.Separator))
 }

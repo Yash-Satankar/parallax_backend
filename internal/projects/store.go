@@ -220,7 +220,7 @@ func (s *Store) ResolveFile(id, rel string) (string, error) {
 		return "", err
 	}
 	rel = filepath.Clean(filepath.FromSlash(rel))
-	if rel == "." || filepath.IsAbs(rel) || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+	if rel == "." || filepath.IsAbs(rel) || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || strings.HasPrefix(rel, "/") || strings.HasPrefix(rel, "\\") || filepath.VolumeName(rel) != "" {
 		return "", errors.New("invalid media path")
 	}
 	full := filepath.Join(p.Dir, rel)

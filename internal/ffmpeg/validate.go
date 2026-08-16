@@ -274,8 +274,12 @@ func isLavfiExpr(s string) bool {
 func resolveInWorkspace(workspace, p string) (string, error) {
 	workspace = filepath.Clean(workspace)
 	var full string
-	if filepath.IsAbs(p) {
-		full = filepath.Clean(p)
+	if filepath.IsAbs(p) || strings.HasPrefix(p, "/") || strings.HasPrefix(p, "\\") || filepath.VolumeName(p) != "" {
+		var err error
+		full, err = filepath.Abs(p)
+		if err != nil {
+			return "", fmt.Errorf("path %q is outside the workspace", p)
+		}
 	} else {
 		full = filepath.Clean(filepath.Join(workspace, p))
 	}

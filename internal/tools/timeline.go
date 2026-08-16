@@ -446,6 +446,9 @@ func sourceFramesFromProbe(path string, info ffmpeg.MediaProbe, fps int) int {
 }
 
 func sanitizeRel(path string) (string, error) {
+	if filepath.VolumeName(path) != "" || strings.HasPrefix(path, "\\") {
+		return "", jsonError("media path must be project-relative")
+	}
 	path = filepath.ToSlash(strings.TrimSpace(path))
 	if path == "" || strings.HasPrefix(path, "/") || strings.Contains(path, "://") {
 		return "", jsonError("media path must be project-relative")

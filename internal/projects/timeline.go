@@ -568,6 +568,9 @@ func sanitizeMediaPath(path string) (string, error) {
 	if path == "" {
 		return "", nil
 	}
+	if filepath.VolumeName(path) != "" || strings.HasPrefix(path, "\\") {
+		return "", errors.New("media path must be project-relative")
+	}
 	path = filepath.ToSlash(path)
 	if strings.HasPrefix(path, "/") || strings.Contains(path, "://") {
 		return "", errors.New("media path must be project-relative")
