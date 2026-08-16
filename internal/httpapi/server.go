@@ -143,8 +143,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 
 	llmCfg, err := s.Settings.GetByID(req.ProfileID)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
-		return
+		llmCfg = s.Settings.Get()
 	}
 	if err := config.ValidateLLM(llmCfg); err != nil {
 		writeError(w, http.StatusFailedDependency, "LLM is not configured: "+err.Error())

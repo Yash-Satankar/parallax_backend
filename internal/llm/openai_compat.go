@@ -123,7 +123,13 @@ func (c *CompatClient) Stream(ctx context.Context, req Request) (<-chan Delta, e
 	}
 	if resp.StatusCode >= 300 {
 		defer resp.Body.Close()
-		return nil, readAPIError(resp)
+		apiErr := readAPIError(resp)
+		if req.ReasoningEffort != "" && (resp.StatusCode == http.StatusBadRequest || isReasoningEffortError(apiErr.Error())) {
+			reqWithoutReasoning := req
+			reqWithoutReasoning.ReasoningEffort = ""
+			return c.Stream(ctx, reqWithoutReasoning)
+		}
+		return nil, apiErr
 	}
 
 	out := make(chan Delta, 16)
@@ -432,3 +438,14 @@ func toolCallBoundary(id, name string, d ToolCallDelta) bool {
 	}
 	return d.Function.Name != "" && name != "" && d.Function.Name != name
 }
+
+func isReasoningEffortError(msg string) bool {
+	lower := strings.ToLower(msg)
+	return strings.Contains(lower, "reasoning_effort") ||
+		strings.Contains(lower, "reasoning") ||
+		strings.Contains(lower, "thinking") ||
+		strings.Contains(lower, "unsupported_parameter") ||
+		strings.Contains(lower, "extra fields") ||
+		strings.Contains(lower, "unexpected parameter")
+}
+

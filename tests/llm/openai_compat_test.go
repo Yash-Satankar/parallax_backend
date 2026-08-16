@@ -359,3 +359,53 @@ func TestCompatClientHTTPError(t *testing.T) {
 		t.Fatalf("err=%v", err)
 	}
 }
+
+func TestCompatClientStreamReasoningEffortFallback(t *testing.T) {
+	var attempts int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		var body struct {
+			ReasoningEffort string `json:"reasoning_effort"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if attempts == 1 {
+			if body.ReasoningEffort != "high" {
+				t.Errorf("first attempt reasoning_effort=%q", body.ReasoningEffort)
+			}
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"error":{"message":"reasoning_effort is not supported with this model","type":"invalid_request_error","code":"unsupported_parameter"}}`))
+			return
+		}
+		if body.ReasoningEffort != "" {
+			t.Errorf("second attempt reasoning_effort=%q, expected empty", body.ReasoningEffort)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\n"))
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer srv.Close()
+
+	c := NewCompatClient(srv.URL+"/v1", "test-key", "llama-3.3-70b-versatile")
+	c.HTTPClient = srv.Client()
+	ch, err := c.Stream(context.Background(), Request{
+		Messages:        []Message{{Role: RoleUser, Content: "hi"}},
+		ReasoningEffort: ThinkingEffortHigh,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var text strings.Builder
+	for d := range ch {
+		if d.Err != nil {
+			t.Fatal(d.Err)
+		}
+		text.WriteString(d.Content)
+	}
+	if text.String() != "ok" {
+		t.Fatalf("text=%q, want 'ok'", text.String())
+	}
+	if attempts != 2 {
+		t.Fatalf("attempts=%d, want 2", attempts)
+	}
+}
+
