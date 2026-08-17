@@ -16,6 +16,7 @@ import (
 	"parallax/internal/httpapi"
 	"parallax/internal/llm"
 	"parallax/internal/projects"
+	"parallax/internal/search"
 	"parallax/internal/tools"
 )
 
@@ -44,6 +45,7 @@ func main() {
 		log.Error("projects", "err", err)
 		os.Exit(1)
 	}
+	searchMgr := search.NewManager()
 
 	srv := &httpapi.Server{
 		Addr:         cfg.Addr,
@@ -59,6 +61,7 @@ func main() {
 		},
 		Projects:  projectStore,
 		CollabHub: collab.NewHub(projectStore, log),
+		SearchMgr: searchMgr,
 		MaxIters:  cfg.MaxIters,
 		Logger:    log,
 		Workspace: cfg.WorkspaceDir,

@@ -13,6 +13,7 @@ import (
 	"parallax/internal/ffmpeg"
 	"parallax/internal/llm"
 	"parallax/internal/projects"
+	"parallax/internal/search"
 	"parallax/internal/tools"
 )
 
@@ -35,6 +36,7 @@ type Server struct {
 	Logger       *slog.Logger
 	Workspace    string
 	CollabHub    *collab.Hub
+	SearchMgr    *search.Manager
 }
 
 func (s *Server) systemPrompt() string {
@@ -84,6 +86,8 @@ func (s *Server) Handler() http.Handler {
 		mux.HandleFunc("DELETE /v1/projects/{id}/checkpoints/{checkpoint}", s.handleDeleteCheckpoint)
 		// Real-time collaboration WebSocket
 		mux.HandleFunc("GET /v1/projects/{id}/collab", s.handleCollab)
+		// Semantic footage search
+		mux.HandleFunc("GET /v1/projects/{id}/search", s.handleProjectSearch)
 	}
 	return withCORS(withLog(s.log(), withRecovery(s.log(), mux)))
 }
@@ -189,6 +193,18 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 			Workspace:   project.Dir,
 			Bins:        s.Bins,
 			CollabHub:   s.CollabHub,
+		})
+		tools.RegisterAudio(toolRegistry, tools.AudioEnv{
+			Workspace:  project.Dir,
+			Bins:       s.Bins,
+			SearchMgr:  s.SearchMgr,
+			OnMutation: timelineTx.MarkMediaMutation,
+		})
+		embedClient := s.buildEmbedClient(llmCfg)
+		tools.RegisterSearch(toolRegistry, tools.SearchEnv{
+			Workspace:   project.Dir,
+			SearchMgr:   s.SearchMgr,
+			EmbedClient: embedClient,
 		})
 	}
 	if toolRegistry == nil {

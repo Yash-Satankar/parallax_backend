@@ -31,6 +31,20 @@ type LLM struct {
 	BaseURL string `json:"base_url"`
 	APIKey  string `json:"api_key"`
 	Model   string `json:"model"`
+
+	// Optional: embedding model endpoint (OpenAI-compat /v1/embeddings).
+	// Falls back to BaseURL+APIKey when EmbeddingBaseURL is empty.
+	EmbeddingModel   string `json:"embedding_model,omitempty"`
+	EmbeddingBaseURL string `json:"embedding_base_url,omitempty"`
+
+	// Optional: transcription model endpoint (OpenAI-compat /v1/audio/transcriptions).
+	// Falls back to BaseURL+APIKey when TranscribeBaseURL is empty.
+	TranscribeModel   string `json:"transcribe_model,omitempty"`
+	TranscribeBaseURL string `json:"transcribe_base_url,omitempty"`
+
+	// Optional: TTS model endpoint (OpenAI-compat /v1/audio/speech).
+	TTSModel   string `json:"tts_model,omitempty"`
+	TTSBaseURL string `json:"tts_base_url,omitempty"`
 }
 
 // Settings is the in-memory multi-model snapshot.
@@ -51,6 +65,14 @@ type Config struct {
 	FFmpegBin    string
 	FFprobeBin   string
 	LLMs         []LLM
+
+	// Search / AI features (optional; features degrade gracefully when unset)
+	EmbeddingModel   string // e.g. "text-embedding-3-small"
+	EmbeddingBaseURL string // defaults to active LLM base URL
+	TranscribeModel  string // e.g. "whisper-1"
+	TranscribeBaseURL string
+	TTSModel         string // e.g. "tts-1"
+	TTSBaseURL       string
 }
 
 // Load reads optional .env files, then environment variables.
@@ -76,16 +98,22 @@ func Load() (Config, error) {
 	}
 
 	cfg := Config{
-		Addr:         envOr("PARALLAX_ADDR", DefaultAddr),
-		WorkspaceDir: workspace,
-		DataDir:      data,
-		SettingsPath: filepath.Join(data, "settings.json"),
-		ExaAPIKey:    strings.TrimSpace(os.Getenv("EXA_API_KEY")),
-		ExaBaseURL:   envOr("EXA_BASE_URL", "https://api.exa.ai"),
-		MaxIters:     envInt("PARALLAX_MAX_ITERS", DefaultMaxIters),
-		FFmpegBin:    envOr("FFMPEG_BIN", "ffmpeg"),
-		FFprobeBin:   envOr("FFPROBE_BIN", "ffprobe"),
-		LLMs:         LoadLLMProfiles(),
+		Addr:              envOr("PARALLAX_ADDR", DefaultAddr),
+		WorkspaceDir:      workspace,
+		DataDir:           data,
+		SettingsPath:      filepath.Join(data, "settings.json"),
+		ExaAPIKey:         strings.TrimSpace(os.Getenv("EXA_API_KEY")),
+		ExaBaseURL:        envOr("EXA_BASE_URL", "https://api.exa.ai"),
+		MaxIters:          envInt("PARALLAX_MAX_ITERS", DefaultMaxIters),
+		FFmpegBin:         envOr("FFMPEG_BIN", "ffmpeg"),
+		FFprobeBin:        envOr("FFPROBE_BIN", "ffprobe"),
+		LLMs:              LoadLLMProfiles(),
+		EmbeddingModel:    strings.TrimSpace(os.Getenv("EMBEDDING_MODEL")),
+		EmbeddingBaseURL:  strings.TrimSpace(os.Getenv("EMBEDDING_BASE_URL")),
+		TranscribeModel:   envOr("TRANSCRIBE_MODEL", "whisper-1"),
+		TranscribeBaseURL: strings.TrimSpace(os.Getenv("TRANSCRIBE_BASE_URL")),
+		TTSModel:          envOr("TTS_MODEL", "tts-1"),
+		TTSBaseURL:        strings.TrimSpace(os.Getenv("TTS_BASE_URL")),
 	}
 
 	if cfg.MaxIters < 1 {
@@ -318,10 +346,14 @@ func LoadLLMProfiles() []LLM {
 	}
 
 	return normalizeProfiles([]LLM{{
-		ID:      defaultProfileID,
-		BaseURL: envOr("LLM_BASE_URL", DefaultBaseURL),
-		APIKey:  firstNonEmpty(os.Getenv("LLM_API_KEY"), os.Getenv("XAI_API_KEY")),
-		Model:   envOr("LLM_MODEL", DefaultModel),
+		ID:               defaultProfileID,
+		BaseURL:          envOr("LLM_BASE_URL", DefaultBaseURL),
+		APIKey:           firstNonEmpty(os.Getenv("LLM_API_KEY"), os.Getenv("XAI_API_KEY")),
+		Model:            envOr("LLM_MODEL", DefaultModel),
+		EmbeddingModel:   strings.TrimSpace(os.Getenv("EMBEDDING_MODEL")),
+		EmbeddingBaseURL: strings.TrimSpace(os.Getenv("EMBEDDING_BASE_URL")),
+		TranscribeModel:  envOr("TRANSCRIBE_MODEL", "whisper-1"),
+		TTSModel:         envOr("TTS_MODEL", "tts-1"),
 	}})
 }
 
@@ -355,6 +387,12 @@ func normalizeProfile(l LLM, fallbackID string) LLM {
 	l.BaseURL = strings.TrimRight(strings.TrimSpace(l.BaseURL), "/")
 	l.APIKey = strings.TrimSpace(l.APIKey)
 	l.Model = strings.TrimSpace(l.Model)
+	l.EmbeddingModel = strings.TrimSpace(l.EmbeddingModel)
+	l.EmbeddingBaseURL = strings.TrimRight(strings.TrimSpace(l.EmbeddingBaseURL), "/")
+	l.TranscribeModel = strings.TrimSpace(l.TranscribeModel)
+	l.TranscribeBaseURL = strings.TrimRight(strings.TrimSpace(l.TranscribeBaseURL), "/")
+	l.TTSModel = strings.TrimSpace(l.TTSModel)
+	l.TTSBaseURL = strings.TrimRight(strings.TrimSpace(l.TTSBaseURL), "/")
 	return l
 }
 

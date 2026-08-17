@@ -135,6 +135,12 @@ func (s *Server) handleUploadMedia(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.attachDurations(id, uploaded)
+	for _, m := range uploaded {
+		if m.Kind == "video" || m.Kind == "audio" {
+			mediaPath := m.Path
+			go s.triggerIngestion(id, mediaPath)
+		}
+	}
 	writeJSON(w, http.StatusCreated, map[string]any{"media": mediaResponses(id, uploaded)})
 }
 
