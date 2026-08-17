@@ -147,6 +147,10 @@ type Room struct {
 	transitions []projects.TimelineTransition
 	fps         int
 
+	// Opt-in synchronized playback: tracks which client is the current leader.
+	// Empty string means no synchronized playback is active.
+	playbackLeader string
+
 	// Flush debounce
 	debounceMu    sync.Mutex
 	debounceTimer *time.Timer
@@ -346,6 +350,26 @@ func (r *Room) handleMsg(c *Client, raw []byte) {
 		r.mu.Unlock()
 		b, _ := NewMsg(MsgTypePresenceUpdate, p)
 		r.broadcast <- broadcastMsg{data: b, exclude: c.clientID}
+
+	case MsgTypePlaybackSync:
+		// Pure relay: inject server wall time so receivers can correct for latency.
+		var p PlaybackSyncPayload
+		if err := json.Unmarshal(msg.Payload, &p); err != nil {
+			return
+		}
+		p.ClientID = c.clientID
+		p.ServerTimeMs = time.Now().UnixMilli()
+		// Record this client as the playback leader.
+		r.mu.Lock()
+		r.playbackLeader = c.clientID
+		r.mu.Unlock()
+		b, _ := NewMsg(MsgTypePlaybackSync, p)
+		r.broadcast <- broadcastMsg{data: b, exclude: c.clientID}
+
+	case MsgTypeFrameChunk:
+		// Phase 5 — pure relay of EncodedVideoChunk data between peers.
+		// Server never decodes or inspects the chunk payload.
+		r.broadcast <- broadcastMsg{data: raw, exclude: c.clientID}
 	}
 }
 
@@ -662,7 +686,9 @@ const (
 	writeWait      = 10 * time.Second
 	pongWait       = 60 * time.Second
 	pingPeriod     = (pongWait * 9) / 10
-	maxMessageSize = 64 * 1024
+	// Raised from 64 KB to 256 KB to support Phase 5 frame_chunk relay.
+	// EncodedVideoChunks (base64-encoded) can approach 80–100 KB for I-frames.
+	maxMessageSize = 256 * 1024
 )
 
 // Client is one WebSocket connection.

@@ -25,8 +25,12 @@ const (
 	MsgTypePresenceLeave MsgType = "presence_leave"
 	// Broadcast when a named checkpoint is committed to the revision history.
 	MsgTypeCheckpointCreated MsgType = "checkpoint_created"
-	// Sent by a client to express its intent (same types as above).
-	// The server re-broadcasts accepted ops to all other clients.
+	// Broadcast when a client sends its playback position for opt-in sync.
+	// Server is a pure relay but injects ServerTimeMs for latency correction.
+	MsgTypePlaybackSync MsgType = "playback_sync"
+	// Phase 5: relay of raw EncodedVideoChunk data so peers can decode without
+	// fetching the media file themselves. Server is a pure relay.
+	MsgTypeFrameChunk MsgType = "frame_chunk"
 )
 
 // Msg is the envelope for all WebSocket messages.
@@ -119,4 +123,28 @@ type CheckpointCreatedPayload struct {
 	ProjectID  string `json:"project_id"`
 	RevisionID int    `json:"revision_id"`
 	Name       string `json:"name,omitempty"`
+}
+
+// PlaybackSyncPayload carries opt-in synchronized playback state.
+// The server injects ServerTimeMs (wall clock ms) so receivers can compensate
+// for network latency: adjustedSec = frame/fps + (now - ServerTimeMs)/1000.
+type PlaybackSyncPayload struct {
+	ClientID     string `json:"client_id"`
+	Name         string `json:"name,omitempty"`
+	Frame        int    `json:"frame"`
+	FPS          int    `json:"fps"`
+	IsPlaying    bool   `json:"is_playing"`
+	ServerTimeMs int64  `json:"server_time_ms"`
+}
+
+// FrameChunkPayload relays a raw EncodedVideoChunk between peers (Phase 5).
+// ClipID identifies which clip the chunk belongs to, allowing receivers to
+// route it to the correct VideoDecoder instance without inspecting the data.
+type FrameChunkPayload struct {
+	ClipID      string `json:"clip_id"`
+	TimestampUs int64  `json:"timestamp_us"`
+	IsKeyFrame  bool   `json:"is_key_frame"`
+	// Data is base64-encoded to travel safely as JSON.
+	// Receivers decode to []byte before handing to VideoDecoder.
+	Data        string `json:"data"`
 }
