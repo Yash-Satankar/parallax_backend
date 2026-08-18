@@ -151,16 +151,31 @@ func (c *CompatClient) Stream(ctx context.Context, req Request) (<-chan Delta, e
 // be concatenated (`{"path":"a.mp4"}{}`). Stored sessions can retain that
 // value, so normalize again immediately before sending a request.
 func sanitizeMessages(messages []Message) []Message {
-	out := make([]Message, len(messages))
-	copy(out, messages)
-	for i := range out {
-		if len(out[i].ToolCalls) == 0 {
+	// Remove messages that have no content and no tool calls — some providers
+	// (notably Ollama) reject messages with null/empty content. Keep tool-call
+	// messages and system messages intact.
+	out := make([]Message, 0, len(messages))
+	for i := range messages {
+		m := messages[i]
+		// Normalize tool call arguments if present
+		if len(m.ToolCalls) > 0 {
+			m.ToolCalls = append([]ToolCall(nil), m.ToolCalls...)
+			for j := range m.ToolCalls {
+				m.ToolCalls[j].Function.Arguments = normalizeToolArguments(m.ToolCalls[j].Function.Arguments)
+			}
+			out = append(out, m)
 			continue
 		}
-		out[i].ToolCalls = append([]ToolCall(nil), out[i].ToolCalls...)
-		for j := range out[i].ToolCalls {
-			out[i].ToolCalls[j].Function.Arguments = normalizeToolArguments(out[i].ToolCalls[j].Function.Arguments)
+		// Preserve system messages even if empty (they carry the system prompt)
+		if m.Role == RoleSystem {
+			out = append(out, m)
+			continue
 		}
+		// Skip user/assistant/tool messages that have no content and no toolcalls
+		if strings.TrimSpace(m.Content) == "" {
+			continue
+		}
+		out = append(out, m)
 	}
 	return out
 }

@@ -2,6 +2,7 @@ package ffmpeg
 
 import (
 	"fmt"
+	"os"
 	"strconv"
 	"strings"
 )
@@ -147,8 +148,15 @@ func BuildExportArgs(spec ExportSpec, dest string) ([]string, error) {
 			args = append(args, "-an")
 		}
 	default:
-		preset, crf := x264Quality(spec.Quality)
-		args = append(args, "-c:v", "libx264", "-preset", preset, "-crf", crf, "-pix_fmt", "yuv420p")
+		// Allow opting into a hardware encoder by setting FFMPEG_HW_ENCODER.
+		// Example: FFMPEG_HW_ENCODER=h264_nvenc
+		hw := strings.TrimSpace(os.Getenv("FFMPEG_HW_ENCODER"))
+		if hw != "" {
+			args = append(args, "-c:v", hw)
+		} else {
+			preset, crf := x264Quality(spec.Quality)
+			args = append(args, "-c:v", "libx264", "-preset", preset, "-crf", crf, "-pix_fmt", "yuv420p")
+		}
 		if spec.Audio {
 			args = append(args, "-c:a", "aac", "-b:a", "192k")
 		} else {
