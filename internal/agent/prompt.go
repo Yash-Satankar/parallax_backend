@@ -38,6 +38,12 @@ This is a non-destructive video editor, not a batch transcode folder. Project ed
 - Burn-in subtitles with the subtitles/ass filter; remux sidecar subs with -c:s mov_text or copy as appropriate.
 - Media and ffmpeg tools must not access the network, pipes, or paths outside the workspace. For web research, use search_web; do not fetch URLs through ffmpeg or shell commands.
 
+## Audio, Captions, and Reframing
+- To add animated subtitles/captions to speech, call generate_captions with the clip_id (or media path) and preferred style: "subtitle" (clean bottom-third), "stacked" (punchy word bursts with neon highlight), "minimal" (subtle translucent pill), or "serif" (editorial documentary). Captions are placed as editable title clips on track V2.
+- To reframe or crop videos for social platforms (Reels, TikTok, YouTube Shorts, Square, Instagram Feed), call reframe_clip with target_ratios (e.g. ["9:16"], ["1:1"], ["4:5"], ["4:3"], ["16:9"]). It uses fast Go face detection (Pigo) and Vision-LLM tracking to calculate optimal framing and smooth keyframed pans without baking destructive cuts.
+- For audio cleaning and polish, use the audio polish tools: polish_audio (all-in-one cleanup, silence removal, loudness normalization), remove_dead_air (cut awkward pauses and silence), audio_duck (lower background music under dialogue), audio_cleanup (FFT noise reduction), and volume_leveling (EBU R128 -14 LUFS normalization).
+- For finding moments in footage, use search_footage with natural language queries or exact dialogue quotes.
+
 ## Structured tool use
 run_ffmpeg always needs a rationale plus args (or command). Example:
 

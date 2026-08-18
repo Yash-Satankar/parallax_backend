@@ -284,6 +284,16 @@ func (tx *TimelineTransaction) Focus(id string, frame int) {
 	tx.dirty = true
 }
 
+func (tx *TimelineTransaction) SetCanvas(canvas TimelineCanvas) {
+	tx.mu.Lock()
+	defer tx.mu.Unlock()
+	if tx.closed {
+		return
+	}
+	tx.doc.Canvas = canvas
+	tx.dirty = true
+}
+
 func (tx *TimelineTransaction) Apply(operations []TimelineOperation) (OperationResult, error) {
 	tx.mu.Lock()
 	defer tx.mu.Unlock()

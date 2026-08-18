@@ -92,16 +92,28 @@ type TimelineColor struct {
 	Tint        float64 `json:"tint,omitempty"`
 }
 
+type TimelineCaptionWord struct {
+	Word           string  `json:"word"`
+	StartSec       float64 `json:"start_sec"`
+	EndSec         float64 `json:"end_sec"`
+	StartFrame     int     `json:"start_frame"`
+	DurationFrames int     `json:"duration_frames"`
+}
+
 type TimelineTitle struct {
-	Text        string  `json:"text"`
-	FontFamily  string  `json:"font_family,omitempty"`
-	FontSize    float64 `json:"font_size,omitempty"`
-	FontWeight  int     `json:"font_weight,omitempty"`
-	Align       string  `json:"align,omitempty"`
-	Fill        string  `json:"fill,omitempty"`
-	Stroke      string  `json:"stroke,omitempty"`
-	StrokeWidth float64 `json:"stroke_width,omitempty"`
-	Background  string  `json:"background,omitempty"`
+	Text           string                `json:"text"`
+	FontFamily     string                `json:"font_family,omitempty"`
+	FontSize       float64               `json:"font_size,omitempty"`
+	FontWeight     int                   `json:"font_weight,omitempty"`
+	Align          string                `json:"align,omitempty"`
+	Fill           string                `json:"fill,omitempty"`
+	Stroke         string                `json:"stroke,omitempty"`
+	StrokeWidth    float64               `json:"stroke_width,omitempty"`
+	Background     string                `json:"background,omitempty"`
+	StylePreset    string                `json:"style_preset,omitempty"`
+	HighlightColor string                `json:"highlight_color,omitempty"`
+	ActiveScale    float64               `json:"active_scale,omitempty"`
+	Words          []TimelineCaptionWord `json:"words,omitempty"`
 }
 
 type TimelineKeyframe struct {
@@ -587,7 +599,7 @@ func sanitizeMediaPath(path string) (string, error) {
 }
 
 func validColor(s string) bool {
-	if len(s) != 4 && len(s) != 7 {
+	if len(s) != 4 && len(s) != 5 && len(s) != 7 && len(s) != 9 {
 		return false
 	}
 	if s[0] != '#' {

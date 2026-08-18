@@ -206,6 +206,29 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 			SearchMgr:   s.SearchMgr,
 			EmbedClient: embedClient,
 		})
+		transcribeClient := s.buildTranscribeClient(llmCfg)
+		tools.RegisterCaptions(toolRegistry, tools.CaptionsEnv{
+			Transaction:      timelineTx,
+			Store:            s.Projects,
+			ProjectID:        projectID,
+			Workspace:        project.Dir,
+			Bins:             s.Bins,
+			TranscribeClient: transcribeClient,
+			CollabHub:        s.CollabHub,
+		})
+		var visionClient llm.ChatProvider
+		if s.NewLLM != nil {
+			visionClient = s.NewLLM(llmCfg)
+		}
+		tools.RegisterReframe(toolRegistry, tools.ReframeEnv{
+			Transaction:  timelineTx,
+			Store:        s.Projects,
+			ProjectID:    projectID,
+			Workspace:    project.Dir,
+			Bins:         s.Bins,
+			VisionClient: visionClient,
+			CollabHub:    s.CollabHub,
+		})
 	}
 	if toolRegistry == nil {
 		writeError(w, http.StatusInternalServerError, "media tools are not configured")
