@@ -19,13 +19,15 @@ import (
 
 // Indexer transcribes imported media, translates segments, and upserts vectors.
 type Indexer struct {
-	Projects   *projects.Store
-	Bins       ffmpeg.Bins
-	Whisper    Transcriber
-	Embeddings *embed.Client
-	Qdrant     *qdrant.Client
-	Completer  func() llm.Completer
-	Logger     *slog.Logger
+	Projects        *projects.Store
+	Bins            ffmpeg.Bins
+	Whisper         Transcriber
+	Embeddings      *embed.Client
+	Qdrant          *qdrant.Client
+	Completer       func() llm.Completer
+	Logger          *slog.Logger
+	WhisperMinDuration float64 // Minimum audio duration in seconds to transcribe (0 = no minimum)
+	WhisperMaxDuration float64 // Maximum audio duration in seconds to transcribe (0 = no maximum)
 	// ImageWorkers is how many stills to caption at once. Zero means 6.
 	// Speech and video stay serial so the GPU is not shared.
 	ImageWorkers int
@@ -51,6 +53,27 @@ func (x *Indexer) log() *slog.Logger {
 		return x.Logger
 	}
 	return slog.Default()
+}
+
+// shouldTranscribe checks if audio with given duration should be transcribed by faster-whisper.
+// Returns true if duration is within the configured min/max range (or if no range is set).
+func (x *Indexer) shouldTranscribe(duration float64) bool {
+	if x == nil {
+		return true
+	}
+	// If both are 0, transcribe everything (default behavior)
+	if x.WhisperMinDuration == 0 && x.WhisperMaxDuration == 0 {
+		return true
+	}
+	// Check minimum duration
+	if x.WhisperMinDuration > 0 && duration < x.WhisperMinDuration {
+		return false
+	}
+	// Check maximum duration
+	if x.WhisperMaxDuration > 0 && duration > x.WhisperMaxDuration {
+		return false
+	}
+	return true
 }
 
 // Enabled is true when speech or still indexing can run. Embeddings may still be skipped.
@@ -258,6 +281,14 @@ func (x *Indexer) indexSpeech(ctx context.Context, projectID, rel string) error 
 	}
 
 	if doc == nil || len(doc.Segments) == 0 {
+		// Check if this audio should be transcribed based on duration
+		if !x.shouldTranscribe(info.Duration) {
+			x.log().Info("skipping transcription: audio duration outside configured range",
+				"project", projectID, "path", rel, "duration", info.Duration,
+				"min", x.WhisperMinDuration, "max", x.WhisperMaxDuration)
+			x.Mark(projectID, rel, StateSkipped, fmt.Sprintf("audio duration %.1f seconds outside transcription range", info.Duration))
+			return nil
+		}
 		x.Mark(projectID, rel, StateTranscribing, "")
 		doc, err = x.transcribe(ctx, projectID, project.Dir, rel, hash, info.Duration)
 		if err != nil {

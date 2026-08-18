@@ -81,6 +81,8 @@ type Config struct {
 	WhisperPython              string
 	WhisperScript              string
 	WhisperCompute             string
+	WhisperMinDuration         float64 // Minimum audio duration in seconds to use faster-whisper (0 = no minimum)
+	WhisperMaxDuration         float64 // Maximum audio duration in seconds to use faster-whisper (0 = no maximum)
 }
 
 // Embedding is a separate OpenAI-compatible /v1/embeddings endpoint.
@@ -150,13 +152,15 @@ func Load() (Config, error) {
 			APIKey:  strings.TrimSpace(os.Getenv("EMBEDDING_API_KEY")),
 			Model:   strings.TrimSpace(os.Getenv("EMBEDDING_MODEL")),
 		},
-		QdrantURL:      strings.TrimRight(envOr("QDRANT_URL", "http://127.0.0.1:6333"), "/"),
-		QdrantAPIKey:   strings.TrimSpace(os.Getenv("QDRANT_API_KEY")),
-		WhisperModel:   envOr("WHISPER_MODEL", "large-v3-turbo"),
-		WhisperDevice:  strings.ToLower(envOr("WHISPER_DEVICE", "auto")),
-		WhisperPython:  resolveExisting(envOr("WHISPER_PYTHON", filepath.Join("scripts", ".venv", "bin", "python")), cwd),
-		WhisperScript:  resolveExisting(envOr("WHISPER_SCRIPT", filepath.Join("scripts", "transcribe.py")), cwd),
-		WhisperCompute: envOr("WHISPER_COMPUTE", "int8"),
+		QdrantURL:              strings.TrimRight(envOr("QDRANT_URL", "http://127.0.0.1:6333"), "/"),
+		QdrantAPIKey:           strings.TrimSpace(os.Getenv("QDRANT_API_KEY")),
+		WhisperModel:           envOr("WHISPER_MODEL", "large-v3-turbo"),
+		WhisperDevice:          strings.ToLower(envOr("WHISPER_DEVICE", "auto")),
+		WhisperPython:          resolveExisting(envOr("WHISPER_PYTHON", filepath.Join("scripts", ".venv", "bin", "python")), cwd),
+		WhisperScript:          resolveExisting(envOr("WHISPER_SCRIPT", filepath.Join("scripts", "transcribe.py")), cwd),
+		WhisperCompute:         envOr("WHISPER_COMPUTE", "int8"),
+		WhisperMinDuration:     envFloat("WHISPER_MIN_DURATION", 0),
+		WhisperMaxDuration:     envFloat("WHISPER_MAX_DURATION", 0),
 	}
 
 	if cfg.MaxIters < 1 {
@@ -543,6 +547,18 @@ func envInt(key string, fallback int) int {
 		return fallback
 	}
 	return n
+}
+
+func envFloat(key string, fallback float64) float64 {
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		return fallback
+	}
+	f, err := strconv.ParseFloat(v, 64)
+	if err != nil {
+		return fallback
+	}
+	return f
 }
 
 func firstNonEmpty(vals ...string) string {

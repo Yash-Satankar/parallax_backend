@@ -102,7 +102,9 @@ func main() {
 		Completer: func() llm.Completer {
 			return llm.NewCompatClient(settings.Get().BaseURL, settings.Get().APIKey, settings.Get().Model)
 		},
-		Logger: log,
+		Logger:                 log,
+		WhisperMinDuration:     cfg.WhisperMinDuration,
+		WhisperMaxDuration:     cfg.WhisperMaxDuration,
 	}
 	if whisperConfigured(cfg) {
 		idx.Whisper = &transcript.FasterWhisper{
