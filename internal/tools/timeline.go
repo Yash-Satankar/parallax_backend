@@ -43,7 +43,7 @@ func RegisterTimeline(reg *Registry, env TimelineEnv) {
 	), env.placeMedia)
 	reg.Register(llm.NewFunctionTool(
 		"edit_timeline",
-		"Apply one atomic batch of validated non-destructive timeline operations. operations_json must be a JSON array. Each object needs type and the fields for that operation. Types: place_media uses path; add_item/update_item use item; remove_items uses ids; move_item uses id/start_frame/track; trim_item uses id and timing fields; split_item uses id/frame; transition operations use transition or id. For imported video/audio/images prefer place_media. Use this for titles, trims, moves, grades, keyframes, and transitions.",
+		"Apply one atomic batch of validated non-destructive timeline operations. operations_json must be a JSON array. Each object needs type and the fields for that operation. Types: place_media uses path; add_item/update_item use item; remove_items uses ids; move_item uses id/start_frame/track; trim_item uses id and timing fields; split_item uses id/frame; transition operations use transition or id. For imported video/audio/images prefer place_media. Use this for titles, caption size (C1 title.font_size and transform.scale), trims, moves, grades, keyframes, and transitions.",
 		json.RawMessage(`{
 			"type":"object",
 			"properties":{
@@ -269,7 +269,7 @@ func (e TimelineEnv) placementOps(ctx context.Context, doc projects.Timeline, op
 }
 
 func (e TimelineEnv) completeAddItem(ctx context.Context, doc projects.Timeline, op projects.TimelineOperation, batch []projects.TimelineOperation) (projects.TimelineOperation, *projects.TimelineOperation) {
-	if op.Item == nil || strings.TrimSpace(op.Item.MediaPath) == "" || op.Item.Kind == "title" || op.Item.Track == "V2" {
+	if op.Item == nil || strings.TrimSpace(op.Item.MediaPath) == "" || op.Item.Kind == "title" || op.Item.Kind == "caption" || op.Item.Track == "V2" || op.Item.Track == "C1" {
 		return op, nil
 	}
 	rel, info, err := e.probePlacement(ctx, op.Item.MediaPath)

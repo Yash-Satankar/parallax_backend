@@ -20,6 +20,8 @@ Agent loop  (no framework)
     ├── list_workspace / inspect_file / probe_media
     └── run_ffmpeg  →  argv parse → sandbox validate → exec.Command (no shell)
     └── search_web   →  Exa Search API (links + highlights/full page text)
+    └── generate_image →  Gemini image generation (still lands in the project bin)
+    └── search_transcript / get_transcript / add_captions  →  Whisper index + timed captions
     │
     ▼
 Any OpenAI-compatible /v1/chat/completions
@@ -29,6 +31,16 @@ Any OpenAI-compatible /v1/chat/completions
 The agent is a plain `for` loop in `internal/agent`. The only LLM dependency is the `llm.ChatProvider` interface. Production uses `llm.CompatClient`, which speaks Chat Completions + SSE + function tools — the dialect almost every hosted model implements. Changing provider is a settings change, not a code change.
 
 FFmpeg is never executed as a shell string. Commands arrive as structured tool arguments (`args: [...]`), get validated (binary, metacharacters, workspace paths), and run with `exec.CommandContext`.
+
+At startup the server probes ffmpeg plus the host GPUs and, when a backend
+actually encodes a test frame, rewrites software video codecs (`libx264`,
+`libx265`, `libvpx-vp9`, SVT/AOM AV1) to that encoder for exports, caption
+burns, and `run_ffmpeg`. NVIDIA NVENC is preferred when present; then
+VideoToolbox, Intel QSV, then VAAPI. Filter-heavy graphs stay in system
+memory and only the encode steps onto the GPU (NVENC accepts those frames
+directly). A failed GPU encode retries on CPU. Set `FFMPEG_HWACCEL=off` to
+disable, or pin `cuda` / `vaapi` / `qsv` / `videotoolbox`. `FFMPEG_HWDEVICE`
+selects a GPU index or `/dev/dri/renderD*` node.
 
 ## Configure the LLM
 
@@ -53,6 +65,50 @@ The server keeps the key private and exposes a `search_web` function to
 Director. It uses Exa's `/search` endpoint, defaults to compact highlights,
 and supports full page text with `content_mode: "text"`. `EXA_BASE_URL` is
 optional and defaults to `https://api.exa.ai`.
+
+To let Director generate stills into the project bin, set `GEMINI_API_KEY`
+(or `GOOGLE_API_KEY`). The server keeps the key private and exposes a
+`generate_image` function. It calls Gemini's Interactions image API
+(`gemini-3.1-flash-image` by default). A text prompt creates a new still.
+Passing `source` (or `images`) sends an existing uploaded or generated
+file with the edit instructions — Gemini's image-to-image path — and
+replaces that bin item in place so the timeline updates. Use
+`apply_to: "none"` to keep a separate variant. Optional overrides:
+
+| Field | Env | Default |
+|-------|-----|---------|
+| API key | `GEMINI_API_KEY` (or `GOOGLE_API_KEY`) | _(empty)_ |
+| Base URL | `GEMINI_API_BASE` | `https://generativelanguage.googleapis.com/v1beta` |
+| Model | `GEMINI_IMAGE_MODEL` | `gemini-3.1-flash-image` |
+
+To let Director generate voiceovers and sound effects, set `ELEVENLABS_API_KEY`.
+Music generation uses Gemini Lyria 3, so set `GEMINI_API_KEY` as well. The
+integrations are implemented in Go and use the provider REST APIs directly.
+
+```bash
+GEMINI_API_KEY=your-gemini-key
+GEMINI_MUSIC_MODEL=lyria-3-pro-preview
+GEMINI_MUSIC_OUTPUT_FORMAT=mp3
+ELEVENLABS_API_KEY=xi-…
+ELEVENLABS_BASE_URL=https://api.elevenlabs.io
+ELEVENLABS_TTS_MODEL=eleven_v3
+ELEVENLABS_SFX_MODEL=eleven_text_to_sound_v2
+ELEVENLABS_TTS_VOICES_FILE=./data/elevenlabs-voices.json
+```
+
+The voice catalog is a JSON array containing `id`, `name`, `description`,
+`languages`, and `characteristics`. Director calls `list_tts_voices` before
+`generate_voiceover`, then can generate-only or place the resulting audio on
+`A1`/`A2` in the same timeline revision. Generated voiceovers use ElevenLabs'
+character timing response for transcript search; music and sound effects are
+indexed from their prompts, lyrics, and generation metadata.
+
+Gemini music prompts should specify the genre, instruments, BPM, key, mood,
+structure, and intended duration. Use `lyria-3-clip-preview` for a fixed
+30-second clip and `lyria-3-pro-preview` for a longer song. Use `[Intro]`,
+`[Verse]`, `[Chorus]`, `[Bridge]`, and `[Outro]` tags or timestamps when the
+arrangement matters; add `instrumental only, no vocals` when the music sits
+under dialogue.
 
 If `LLM_MODELS` is unset, the original single-model vars still work:
 
@@ -81,6 +137,44 @@ Gemini thinking-model tool calls include
 returns it unchanged during sequential and parallel tool-calling steps, as
 required by Gemini's OpenAI-compatible API.
 
+## Transcripts and search
+
+On upload, files with audio are transcribed by a long-lived **faster-whisper**
+worker (`large-v3-turbo`, CUDA int8 when a GPU is available). One file uses the
+GPU at a time. Word-level original language is stored at
+`.parallax/transcripts/<sha256>.json`. Unchanged soundtracks reuse that
+transcript. A Qdrant outage keeps the transcript and marks search indexing as
+failed instead of throwing the whole job away.
+
+Non-English segments are translated to English by the **active chat LLM**.
+English segment text (plus neighboring segments) is embedded through a
+**separate** OpenAI-compatible embeddings endpoint and upserted into **local
+Qdrant**, one collection per project. Stills take the same path: a vision
+caption is written on upload, generate, or in-place edit, then embedded as
+`kind: "image"` points so they do not mix with speech. Stills caption in a
+small Go worker pool (default 6) so a multi-file upload does not wait in a
+single line; speech and video stay serial because of the GPU. Videos are split on
+visual cuts (with interval samples inside long takes); each shot is captioned
+and stored as `kind: "video_scene"` with start/end times. Overlapping English
+transcript text is attached when speech exists. Director must query in
+English and may filter by file path.
+
+```bash
+# from parallax_backend/
+./scripts/setup-whisper.sh
+
+WHISPER_PYTHON=./scripts/.venv/bin/python
+WHISPER_MODEL=large-v3-turbo
+WHISPER_DEVICE=auto
+WHISPER_COMPUTE=int8
+
+EMBEDDING_BASE_URL=https://api.openai.com/v1
+EMBEDDING_API_KEY=sk-…
+EMBEDDING_MODEL=text-embedding-3-small
+
+QDRANT_URL=http://127.0.0.1:6333
+```
+
 ## Run
 
 ```bash
@@ -100,7 +194,9 @@ scoped to that directory for the whole session.
 | `GET` | `/v1/projects` | List persistent projects |
 | `POST` | `/v1/projects` | Create a project with `{"name":"…"}` |
 | `GET` | `/v1/projects/{id}` | Get a project and its media |
+| `DELETE` | `/v1/projects/{id}` | Permanently delete a project, its media, chats, transcripts, and embeddings |
 | `GET` | `/v1/projects/{id}/media` | List uploaded and generated media |
+| `GET` | `/v1/projects/{id}/media/search?q=` | Semantic search over stills, video shots, and speech |
 | `POST` | `/v1/projects/{id}/media` | Upload one or more multipart `files` |
 | `POST` | `/v1/projects/{id}/export` | Render a downloadable file (`mp4`, `mov`, `webm`, `gif`, `mp3`) |
 | `GET` | `/v1/projects/{id}/files/{path...}` | Stream a project file with range support |
@@ -119,7 +215,11 @@ scoped to that directory for the whole session.
 | `POST` | `/v1/projects/{id}/checkpoints` | Name the current or selected revision |
 
 Include `project_id` and `session_id` (the chat id) in `/v1/agent/chat`
-requests. The agent only sees files inside that project's workspace. Director
+requests. Optional `images` is an array of `{name, mime, data}` stills
+(base64 or data URLs). They are saved under `.parallax/chat-media/`, shown
+in the chat, and sent to the model as Chat Completions `image_url` parts so
+vision-capable models can see them. The agent only sees workspace files
+through tools; chat attachments are vision context, not bin items. Director
 timeline and media changes are staged for the request and commit as one
 revision. Timeline-representable edits remain non-destructive. FFmpeg
 fallbacks keep one logical bin item while content-addressed objects preserve
@@ -167,6 +267,14 @@ project fps, source in-points, and media paths (not playback URLs).
 | `restore_project_revision` | Restore a selected revision |
 | `create_project_checkpoint` | Name the state committed by the current request |
 | `search_web` | Search the web through Exa for links, metadata, and page content |
+| `generate_image` | Generate a still with Gemini, or edit an existing uploaded/generated still by sending it back with a prompt |
+| `search_images` | English semantic search over this project's described stills (optional path filter) |
+| `get_image_caption` | Read the stored English description for one still |
+| `search_scenes` | English semantic search over this project's video shots (optional path filter) |
+| `get_video_scenes` | Read stored shot times and descriptions for one video |
+| `search_transcript` | English semantic search over this project's speech (optional path filter) |
+| `get_transcript` | Read the timed original + English transcript for one file |
+| `add_captions` | Place a visible C1 caption track from the stored transcript (or burn into the picture) |
 
 ## Tests
 

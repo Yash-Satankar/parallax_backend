@@ -45,6 +45,10 @@ type SequenceClip struct {
 	FadeOut      float64
 	FadeColor    string
 	CrossfadeIn  bool
+	SubtitlePath string
+	CaptionLang  string
+	FontName     string
+	FontsDir     string
 }
 
 type SequenceKeyframe struct {
@@ -97,6 +101,7 @@ func BuildSequenceArgs(spec ExportSpec, clips []SequenceClip, dest string) ([]st
 	pictures := pictureClips(clips)
 	audios := audioClips(clips)
 	titles := titleClips(clips)
+	captions := captionClips(clips)
 	wantAudio := spec.Audio && spec.Format != "gif"
 	if spec.Format == "mp3" {
 		wantAudio = true
@@ -104,6 +109,8 @@ func BuildSequenceArgs(spec ExportSpec, clips []SequenceClip, dest string) ([]st
 			return nil, fmt.Errorf("sequence has no audio to export")
 		}
 	}
+
+	softSubs := spec.CaptionMode() == "soft" && len(spec.Subtitles) > 0
 
 	args := []string{"-y", "-hide_banner"}
 	inputOf := map[int]int{}
@@ -148,6 +155,15 @@ func BuildSequenceArgs(spec ExportSpec, clips []SequenceClip, dest string) ([]st
 			}
 			args = append(args, "-t", formatSeconds(inputDuration), "-i", clip.Path)
 			audioOf[i] = next
+			next++
+		}
+	}
+
+	subInput := make([]int, 0, len(spec.Subtitles))
+	if softSubs {
+		for _, sub := range spec.Subtitles {
+			args = append(args, "-i", sub.Path)
+			subInput = append(subInput, next)
 			next++
 		}
 	}
@@ -262,6 +278,17 @@ func BuildSequenceArgs(spec ExportSpec, clips []SequenceClip, dest string) ([]st
 				cur, text, fill, formatSeconds(fontSize), ch, xexpr, yexpr, opacityExpression(clip, fps), formatSeconds(clip.Start), formatSeconds(clip.Start+clip.Duration), out))
 			cur = out
 		}
+		if spec.CaptionMode() == "burn" {
+			for i, clip := range captions {
+				if strings.TrimSpace(clip.SubtitlePath) == "" {
+					continue
+				}
+				out := fmt.Sprintf("cap%d", i)
+				filter := subtitleFilter(clip.SubtitlePath, CaptionFont{Name: clip.FontName, FontsDir: clip.FontsDir, Size: captionBurnSize(clip), Fill: clip.Fill})
+				filters = append(filters, fmt.Sprintf("[%s]%s[%s]", cur, filter, out))
+				cur = out
+			}
+		}
 		if !strings.Contains(cur, ":") {
 			videoOut = cur
 		} else {
@@ -309,6 +336,11 @@ func BuildSequenceArgs(spec ExportSpec, clips []SequenceClip, dest string) ([]st
 			args = append(args, "-map", "["+audioOut+"]")
 		}
 	}
+	if softSubs {
+		for _, in := range subInput {
+			args = append(args, "-map", fmt.Sprintf("%d:s:0?", in))
+		}
+	}
 
 	if spec.Start > 0 {
 		args = append(args, "-ss", formatSeconds(spec.Start))
@@ -340,6 +372,10 @@ func BuildSequenceArgs(spec ExportSpec, clips []SequenceClip, dest string) ([]st
 		} else {
 			args = append(args, "-an")
 		}
+	}
+	if softSubs {
+		args = append(args, "-c:s", spec.subtitleCodec())
+		args = appendSubtitleMetadata(args, spec)
 	}
 	args = append(args, dest)
 	return args, nil
@@ -413,6 +449,31 @@ func titleClips(clips []SequenceClip) []SequenceClip {
 	var out []SequenceClip
 	for _, clip := range clips {
 		if clip.Kind == "title" {
+			out = append(out, clip)
+		}
+	}
+	return out
+}
+
+func captionBurnSize(clip SequenceClip) float64 {
+	size := clip.FontSize
+	if size <= 0 {
+		size = 32
+	}
+	sx, sy := clip.ScaleX, clip.ScaleY
+	if sx == 0 {
+		sx = 1
+	}
+	if sy == 0 {
+		sy = 1
+	}
+	return size * (sx + sy) / 2
+}
+
+func captionClips(clips []SequenceClip) []SequenceClip {
+	var out []SequenceClip
+	for _, clip := range clips {
+		if clip.Kind == "caption" && strings.TrimSpace(clip.SubtitlePath) != "" {
 			out = append(out, clip)
 		}
 	}

@@ -3,6 +3,7 @@ package projects
 import (
 	"encoding/json"
 	"errors"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -51,7 +52,7 @@ func (s *Store) ListChats(projectID string) ([]ChatMeta, error) {
 	if err != nil {
 		return nil, err
 	}
-	out := append([]ChatMeta(nil), idx.Chats...)
+	out := append([]ChatMeta{}, idx.Chats...)
 	sort.Slice(out, func(i, j int) bool { return out[i].UpdatedAt.After(out[j].UpdatedAt) })
 	return out, nil
 }
@@ -180,6 +181,7 @@ func (s *Store) SaveChatMessages(projectID, chatID string, msgs []llm.Message) (
 		return Chat{}, err
 	}
 	chat.Messages = append([]llm.Message(nil), msgs...)
+	pruneChatMetadata(&chat)
 	chat.UpdatedAt = time.Now().UTC()
 	if title := chatTitle(chat.Title, msgs); title != chat.Title {
 		chat.Title = title
@@ -375,6 +377,12 @@ func chatTitle(current string, msgs []llm.Message) string {
 		if title := firstLineTitle(m.Content); title != "" {
 			return title
 		}
+		if len(m.Images) > 0 {
+			if name := strings.TrimSpace(m.Images[0].Name); name != "" {
+				return firstLineTitle(name)
+			}
+			return "Attached image"
+		}
 	}
 	if current != "" {
 		return current
@@ -418,19 +426,50 @@ func firstLineTitle(s string) string {
 	return strings.TrimSpace(b.String())
 }
 
-func PublicChatMessages(msgs []llm.Message, durations map[string]int64, traces map[string][]ChatTraceEvent) []map[string]any {
+func pruneChatMetadata(chat *Chat) {
+	limit := len(chat.Messages)
+	pruneIndexMap(chat.ResponseDurations, limit)
+	if chat.ResponseTraces != nil {
+		for key := range chat.ResponseTraces {
+			index, err := strconv.Atoi(key)
+			if err != nil || index < 0 || index >= limit {
+				delete(chat.ResponseTraces, key)
+			}
+		}
+		if len(chat.ResponseTraces) == 0 {
+			chat.ResponseTraces = nil
+		}
+	}
+}
+
+func pruneIndexMap(values map[string]int64, limit int) {
+	if values == nil {
+		return
+	}
+	for key := range values {
+		index, err := strconv.Atoi(key)
+		if err != nil || index < 0 || index >= limit {
+			delete(values, key)
+		}
+	}
+}
+
+func PublicChatMessages(projectID string, msgs []llm.Message, durations map[string]int64, traces map[string][]ChatTraceEvent) []map[string]any {
 	out := make([]map[string]any, 0, len(msgs))
 	for index, m := range msgs {
 		if m.Role != llm.RoleUser && m.Role != llm.RoleAssistant {
 			continue
 		}
 		text := strings.TrimSpace(m.Content)
-		if text == "" {
+		if text == "" && len(m.Images) == 0 {
 			continue
 		}
 		item := map[string]any{
 			"role":    string(m.Role),
 			"content": text,
+		}
+		if images := publicChatImages(projectID, m.Images); len(images) > 0 {
+			item["images"] = images
 		}
 		if m.Role == llm.RoleAssistant {
 			if duration, ok := durations[strconv.Itoa(index)]; ok && duration > 0 {
@@ -443,4 +482,35 @@ func PublicChatMessages(msgs []llm.Message, durations map[string]int64, traces m
 		out = append(out, item)
 	}
 	return out
+}
+
+func publicChatImages(projectID string, images []llm.ImageRef) []map[string]any {
+	if len(images) == 0 {
+		return nil
+	}
+	out := make([]map[string]any, 0, len(images))
+	for _, img := range images {
+		path := filepath.ToSlash(strings.TrimSpace(img.Path))
+		if path == "" {
+			continue
+		}
+		item := map[string]any{
+			"path": path,
+			"name": img.Name,
+			"mime": img.MIME,
+		}
+		if projectID != "" {
+			item["url"] = chatFileURL(projectID, path)
+		}
+		out = append(out, item)
+	}
+	return out
+}
+
+func chatFileURL(projectID, path string) string {
+	parts := strings.Split(filepath.ToSlash(path), "/")
+	for i := range parts {
+		parts[i] = url.PathEscape(parts[i])
+	}
+	return "/v1/projects/" + url.PathEscape(projectID) + "/files/" + strings.Join(parts, "/")
 }

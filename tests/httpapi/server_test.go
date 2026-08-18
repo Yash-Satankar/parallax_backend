@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -18,10 +20,13 @@ import (
 	"parallax/internal/agent"
 	"parallax/internal/collab"
 	"parallax/internal/config"
+	"parallax/internal/embed"
 	. "parallax/internal/httpapi"
 	"parallax/internal/llm"
 	"parallax/internal/projects"
+	"parallax/internal/qdrant"
 	"parallax/internal/tools"
+	"parallax/internal/transcript"
 )
 
 type fakeProvider struct {
@@ -69,6 +74,80 @@ func TestChatPassesThinkingEffort(t *testing.T) {
 	}
 }
 
+func TestChatAcceptsAttachedImage(t *testing.T) {
+	var seen llm.Request
+	s := testServer(t, fakeProvider{
+		deltas: []llm.Delta{{Content: "warm tungsten", FinishReason: "stop"}},
+		seen:   &seen,
+	})
+	ts := httptest.NewServer(s.Handler())
+	defer ts.Close()
+
+	project, err := s.Projects.Create("Refs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	jpeg := "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAIBAQEBAQIBAQECAgICAgQDAgICAgUEBAMEBgUGBgYFBgYGBwkIBgcJBwYGCAsICQoKCgoKBggLDAsKDAkKCgr/2wBDAQICAgICAgUDAwUKBwYHCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgr/wAARCAABAAEDASIAAhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAAAgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkKFhcYGRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/8QAHwEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoL/8QAtREAAgECBAQDBAcFBAQAAQJ3AAECAxEEBSExBhJBUQdhcRMiMoEIFEKRobHBCSMzUvAVYnLRChYkNOEl8RcYGRomJygpKjU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6goOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPExcbHyMnK0tPU1dbX2Nna4+Tl5ufo6erx8vP09fb3+Pn6/9oADAMBAAIRAxEAPwD4vooor+Uz/fw//9k="
+	body := `{"project_id":"` + project.ID + `","message":"match this look","images":[{"name":"ref.jpg","mime":"image/jpeg","data":"` + jpeg + `"}]}`
+	resp, err := http.Post(ts.URL+"/v1/agent/chat", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	_, _ = io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status=%s", resp.Status)
+	}
+	if len(seen.Messages) == 0 {
+		t.Fatal("no messages sent to the model")
+	}
+	var user llm.Message
+	for _, msg := range seen.Messages {
+		if msg.Role == llm.RoleUser {
+			user = msg
+		}
+	}
+	if user.Content != "match this look" || len(user.Images) != 1 || user.Images[0].Data == "" {
+		t.Fatalf("user=%+v", user)
+	}
+	if _, err := os.Stat(filepath.Join(project.Dir, filepath.FromSlash(user.Images[0].Path))); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestChatRegistersGenerateImage(t *testing.T) {
+	var seen llm.Request
+	s := testServer(t, fakeProvider{
+		deltas: []llm.Delta{{Content: "ok", FinishReason: "stop"}},
+		seen:   &seen,
+	})
+	s.GeminiAPIKey = "gemini-test"
+	ts := httptest.NewServer(s.Handler())
+	defer ts.Close()
+
+	project, err := s.Projects.Create("Stills")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := `{"project_id":"` + project.ID + `","message":"generate a title card"}`
+	resp, err := http.Post(ts.URL+"/v1/agent/chat", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	_, _ = io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status=%s", resp.Status)
+	}
+	names := map[string]bool{}
+	for _, tool := range seen.Tools {
+		names[tool.Function.Name] = true
+	}
+	if !names["generate_image"] {
+		t.Fatalf("tools=%v", names)
+	}
+}
+
 func testServer(t *testing.T, p llm.ChatProvider) *Server {
 	t.Helper()
 	dir := t.TempDir()
@@ -90,6 +169,225 @@ func testServer(t *testing.T, p llm.ChatProvider) *Server {
 		MaxIters:  4,
 		Workspace: dir,
 		NewLLM:    func(config.LLM) llm.ChatProvider { return p },
+	}
+}
+
+func TestSearchMediaReturnsIndexHits(t *testing.T) {
+	s := testServer(t, fakeProvider{})
+	var gotQuery []string
+	embedSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Input []string `json:"input"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		gotQuery = req.Input
+		_ = json.NewEncoder(w).Encode(map[string]any{"data": []map[string]any{{"index": 0, "embedding": []float32{0.2, 0.1}}}})
+	}))
+	defer embedSrv.Close()
+	qdrantSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.Contains(r.URL.Path, "/points/search") {
+			http.Error(w, "unhandled", http.StatusInternalServerError)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"result": []map[string]any{{
+				"id": "p1", "score": 0.87,
+				"payload": map[string]any{"kind": "image", "path": "media/neon-alley.jpg", "name": "neon-alley.jpg", "text_en": "Night alley with magenta neon"},
+			}},
+		})
+	}))
+	defer qdrantSrv.Close()
+	emb := embed.NewClient(embedSrv.URL+"/v1", "k", "m")
+	emb.HTTPClient = embedSrv.Client()
+	qd := qdrant.NewClient(qdrantSrv.URL, "")
+	qd.HTTPClient = qdrantSrv.Client()
+	s.Indexer = &transcript.Indexer{Projects: s.Projects, Embeddings: emb, Qdrant: qd}
+
+	ts := httptest.NewServer(s.Handler())
+	defer ts.Close()
+	resp, err := http.Post(ts.URL+"/v1/projects", "application/json", strings.NewReader(`{"name":"Demo"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var created struct {
+		ID string `json:"id"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&created); err != nil {
+		t.Fatal(err)
+	}
+
+	resp, err = http.Get(ts.URL + "/v1/projects/" + created.ID + "/media/search?q=neon+alley")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status=%s", resp.Status)
+	}
+	var body struct {
+		Query   string `json:"query"`
+		Results []struct {
+			Path   string  `json:"path"`
+			Kind   string  `json:"kind"`
+			Score  float64 `json:"score"`
+			TextEN string  `json:"text_en"`
+		} `json:"results"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Query != "neon alley" || len(body.Results) != 1 || body.Results[0].Path != "media/neon-alley.jpg" || body.Results[0].Kind != "image" {
+		t.Fatalf("body=%+v", body)
+	}
+	if len(gotQuery) != 1 || gotQuery[0] != "neon alley" {
+		t.Fatalf("embedded=%v", gotQuery)
+	}
+}
+
+func TestListMediaIncludesTranscriptStatus(t *testing.T) {
+	s := testServer(t, fakeProvider{})
+	s.Indexer = &transcript.Indexer{Projects: s.Projects}
+	ts := httptest.NewServer(s.Handler())
+	defer ts.Close()
+
+	resp, err := http.Post(ts.URL+"/v1/projects", "application/json", strings.NewReader(`{"name":"Demo"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var created struct {
+		ID string `json:"id"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&created); err != nil {
+		t.Fatal(err)
+	}
+
+	var body bytes.Buffer
+	mw := multipart.NewWriter(&body)
+	part, err := mw.CreateFormFile("files", "talk.mp4")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = part.Write([]byte("video-bytes"))
+	_ = mw.Close()
+	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/v1/projects/"+created.ID+"/media", &body)
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	s.Indexer.Mark(created.ID, "media/talk.mp4", transcript.StateTranscribing, "")
+
+	resp, err = http.Get(ts.URL + "/v1/projects/" + created.ID + "/media")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var listed struct {
+		Media []struct {
+			Path       string `json:"path"`
+			Transcript *struct {
+				State string `json:"state"`
+			} `json:"transcript"`
+		} `json:"media"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&listed); err != nil {
+		t.Fatal(err)
+	}
+	if len(listed.Media) != 1 || listed.Media[0].Transcript == nil || listed.Media[0].Transcript.State != transcript.StateTranscribing {
+		t.Fatalf("listed=%+v", listed)
+	}
+}
+
+func TestDeleteProjectRemovesWorkspaceAndIndex(t *testing.T) {
+	s := testServer(t, fakeProvider{})
+	deleted := ""
+	qdrantSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete || !strings.Contains(r.URL.Path, "/collections/") {
+			t.Fatalf("unexpected %s %s", r.Method, r.URL.Path)
+		}
+		deleted = r.URL.Path
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"result":true}`))
+	}))
+	defer qdrantSrv.Close()
+	s.Indexer = &transcript.Indexer{
+		Projects: s.Projects,
+		Qdrant:   qdrant.NewClient(qdrantSrv.URL, ""),
+	}
+	s.Indexer.Qdrant.HTTPClient = qdrantSrv.Client()
+	ts := httptest.NewServer(s.Handler())
+	defer ts.Close()
+
+	resp, err := http.Post(ts.URL+"/v1/projects", "application/json", strings.NewReader(`{"name":"Demo"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var created struct {
+		ID string `json:"id"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&created); err != nil {
+		t.Fatal(err)
+	}
+	project, err := s.Projects.Get(created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Projects.SaveUpload(created.ID, "talk.mp4", strings.NewReader("video-bytes")); err != nil {
+		t.Fatal(err)
+	}
+	chat, err := s.Projects.CreateChat(created.ID, "Talk")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Sessions.Remember(&agent.Session{ID: chat.ID, ProjectID: created.ID})
+	s.Indexer.Mark(created.ID, "media/talk.mp4", transcript.StateReady, "")
+
+	req, _ := http.NewRequest(http.MethodDelete, ts.URL+"/v1/projects/"+created.ID, nil)
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		raw, _ := io.ReadAll(resp.Body)
+		t.Fatalf("delete %s %s", resp.Status, raw)
+	}
+	if _, err := s.Projects.Get(created.ID); !errors.Is(err, projects.ErrNotFound) {
+		t.Fatalf("project still listed: %v", err)
+	}
+	if _, err := os.Stat(project.Dir); !os.IsNotExist(err) {
+		t.Fatalf("workspace still exists: %v", err)
+	}
+	if _, ok := s.Sessions.Get(chat.ID); ok {
+		t.Fatal("chat session still in memory")
+	}
+	if len(s.Indexer.Statuses(created.ID)) != 0 {
+		t.Fatalf("index status=%+v", s.Indexer.Statuses(created.ID))
+	}
+	if !strings.Contains(deleted, qdrant.CollectionName(created.ID)) {
+		t.Fatalf("collection path=%q", deleted)
+	}
+
+	resp, err = http.Get(ts.URL + "/v1/projects/" + created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("get after delete status=%s", resp.Status)
+	}
+	req, _ = http.NewRequest(http.MethodDelete, ts.URL+"/v1/projects/"+created.ID, nil)
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("second delete status=%s", resp.Status)
 	}
 }
 
@@ -391,6 +689,37 @@ func TestChatSSE(t *testing.T) {
 	}
 	if !strings.Contains(out, "event: done") {
 		t.Fatalf("missing done: %s", out)
+	}
+}
+
+func TestEmptyChatsListIsArray(t *testing.T) {
+	s := testServer(t, fakeProvider{})
+	ts := httptest.NewServer(s.Handler())
+	defer ts.Close()
+	project, err := s.Projects.Create("Quiet")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.Get(ts.URL + "/v1/projects/" + project.ID + "/chats")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("%s %s", resp.Status, raw)
+	}
+	var listed struct {
+		Chats []struct{} `json:"chats"`
+	}
+	if err := json.Unmarshal(raw, &listed); err != nil {
+		t.Fatal(err)
+	}
+	if listed.Chats == nil {
+		t.Fatalf("chats should be [] not null: %s", raw)
+	}
+	if len(listed.Chats) != 0 {
+		t.Fatalf("listed=%+v", listed)
 	}
 }
 

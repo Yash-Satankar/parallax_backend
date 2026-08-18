@@ -11,6 +11,43 @@ import (
 	. "parallax/internal/llm"
 )
 
+func TestStreamSendsVisionContent(t *testing.T) {
+	var got map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Fatal(err)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\n"))
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer server.Close()
+
+	client := NewCompatClient(server.URL+"/v1", "key", "grok-4.6")
+	ch, err := client.Stream(context.Background(), Request{Messages: []Message{{
+		Role:    RoleUser,
+		Content: "Match this grade",
+		Images:  []ImageRef{{MIME: "image/jpeg", Data: "abc123"}},
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range ch {
+	}
+	msgs, _ := got["messages"].([]any)
+	if len(msgs) != 1 {
+		t.Fatalf("messages=%#v", got["messages"])
+	}
+	content, _ := msgs[0].(map[string]any)["content"].([]any)
+	if len(content) != 2 {
+		t.Fatalf("content=%#v", msgs[0])
+	}
+	image, _ := content[1].(map[string]any)["image_url"].(map[string]any)
+	if content[1].(map[string]any)["type"] != "image_url" || image["url"] != "data:image/jpeg;base64,abc123" {
+		t.Fatalf("image=%#v", content[1])
+	}
+}
+
 func TestCompletionsURL(t *testing.T) {
 	cases := map[string]string{
 		"https://api.x.ai/v1":                  "https://api.x.ai/v1/chat/completions",
@@ -292,6 +329,40 @@ func TestCompatClientStreamsGeminiThoughtSignature(t *testing.T) {
 	}
 }
 
+func TestCompatClientComplete(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/chat/completions" {
+			t.Fatalf("path=%s", r.URL.Path)
+		}
+		var body struct {
+			Stream bool   `json:"stream"`
+			Model  string `json:"model"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		if body.Stream || body.Model != "grok-4.6" {
+			t.Fatalf("body=%+v", body)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"choices": []map[string]any{{"message": map[string]any{"content": `["Thanks"]`}}},
+		})
+	}))
+	defer srv.Close()
+
+	c := NewCompatClient(srv.URL+"/v1", "test-key", "grok-4.6")
+	c.HTTPClient = srv.Client()
+	got, err := c.Complete(context.Background(), Request{
+		Messages: []Message{{Role: RoleUser, Content: "translate"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != `["Thanks"]` {
+		t.Fatalf("got=%q", got)
+	}
+}
+
 func TestCompatClientStream(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/chat/completions" {
@@ -340,6 +411,106 @@ func TestCompatClientStream(t *testing.T) {
 	}
 	if reason != "stop" {
 		t.Fatalf("reason=%q", reason)
+	}
+}
+
+func TestCompatClientStreamsReasoningContent(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"Check the \"}}]}\n\n"))
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"reasoning\":\"timeline first.\"}}]}\n\n"))
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"Done.\",\"reasoning\":{\"text\":\" Then cut.\"}},\"finish_reason\":\"stop\"}]}\n\n"))
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer srv.Close()
+
+	c := NewCompatClient(srv.URL+"/v1", "test-key", "grok-4.6")
+	c.HTTPClient = srv.Client()
+	ch, err := c.Stream(context.Background(), Request{
+		Messages: []Message{{Role: RoleUser, Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var thought, text strings.Builder
+	for d := range ch {
+		if d.Err != nil {
+			t.Fatal(d.Err)
+		}
+		thought.WriteString(d.Reasoning)
+		text.WriteString(d.Content)
+	}
+	if thought.String() != "Check the timeline first. Then cut." {
+		t.Fatalf("reasoning=%q", thought.String())
+	}
+	if text.String() != "Done." {
+		t.Fatalf("content=%q", text.String())
+	}
+}
+
+func TestCompatClientStreamsGeminiThoughtExtraContent(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(`data: {"choices":[{"delta":{"content":"Inspect the cut.","extra_content":{"google":{"thought":true}}}}]}` + "\n\n"))
+		_, _ = w.Write([]byte(`data: {"choices":[{"delta":{"content":"Done.","extra_content":{"google":{"thought_signature":"abc"}}},"finish_reason":"stop"}]}` + "\n\n"))
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer srv.Close()
+
+	c := NewCompatClient(srv.URL+"/v1", "key", "gemini-3.7-flash")
+	c.HTTPClient = srv.Client()
+	ch, err := c.Stream(context.Background(), Request{
+		Messages: []Message{{Role: RoleUser, Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var thought, text strings.Builder
+	for d := range ch {
+		if d.Err != nil {
+			t.Fatal(d.Err)
+		}
+		thought.WriteString(d.Reasoning)
+		text.WriteString(d.Content)
+	}
+	if thought.String() != "Inspect the cut." {
+		t.Fatalf("reasoning=%q", thought.String())
+	}
+	if text.String() != "Done." {
+		t.Fatalf("content=%q", text.String())
+	}
+}
+
+func TestCompatClientSplitsThoughtTagsInContent(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"<thought>Plan the cut.\"}}]}\n\n"))
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"</thought>Here is the recut.\"},\"finish_reason\":\"stop\"}]}\n\n"))
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer srv.Close()
+
+	c := NewCompatClient(srv.URL+"/v1", "key", "gemini-3.7-flash")
+	c.HTTPClient = srv.Client()
+	ch, err := c.Stream(context.Background(), Request{
+		Messages: []Message{{Role: RoleUser, Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var thought, text strings.Builder
+	for d := range ch {
+		if d.Err != nil {
+			t.Fatal(d.Err)
+		}
+		thought.WriteString(d.Reasoning)
+		text.WriteString(d.Content)
+	}
+	if thought.String() != "Plan the cut." {
+		t.Fatalf("reasoning=%q", thought.String())
+	}
+	if text.String() != "Here is the recut." {
+		t.Fatalf("content=%q", text.String())
 	}
 }
 

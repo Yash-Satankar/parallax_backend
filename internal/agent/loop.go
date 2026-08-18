@@ -105,6 +105,7 @@ func (a *Agent) Run(ctx context.Context, in Input, emit Sink) (outcome Outcome) 
 
 		var (
 			text      strings.Builder
+			thought   strings.Builder
 			toolParts []llm.ToolCallDelta
 			reason    string
 		)
@@ -112,6 +113,10 @@ func (a *Agent) Run(ctx context.Context, in Input, emit Sink) (outcome Outcome) 
 			if d.Err != nil {
 				emit(NewEvent(EventError, ErrorPayload{Message: d.Err.Error()}))
 				return Outcome{SessionID: in.SessionID, Messages: messages, Iterations: i, Reason: "error"}
+			}
+			if d.Reasoning != "" {
+				thought.WriteString(d.Reasoning)
+				emit(NewEvent(EventThinking, ThinkingPayload{Delta: d.Reasoning, Iteration: i}))
 			}
 			if d.Content != "" {
 				text.WriteString(d.Content)
@@ -123,6 +128,9 @@ func (a *Agent) Run(ctx context.Context, in Input, emit Sink) (outcome Outcome) 
 			if d.FinishReason != "" {
 				reason = d.FinishReason
 			}
+		}
+		if thought.Len() > 0 {
+			emit(NewEvent(EventThinking, ThinkingPayload{Text: clipText(thought.String(), 16<<10), Iteration: i}))
 		}
 
 		calls := llm.AssembleToolCalls(toolParts)
@@ -222,4 +230,11 @@ func clip(s string, n int) string {
 		return s
 	}
 	return s[:n] + `…"}`
+}
+
+func clipText(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "…"
 }

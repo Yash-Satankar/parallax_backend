@@ -16,6 +16,7 @@ import (
 
 	"parallax/internal/ffmpeg"
 	"parallax/internal/projects"
+	"parallax/internal/transcript"
 )
 
 const maxUploadBytes = 2 << 30
@@ -31,7 +32,8 @@ type projectResponse struct {
 
 type mediaResponse struct {
 	projects.Media
-	ContentURL string `json:"content_url"`
+	ContentURL string                `json:"content_url"`
+	Transcript *transcript.JobStatus `json:"transcript,omitempty"`
 }
 
 func (s *Server) handleListProjects(w http.ResponseWriter, _ *http.Request) {
@@ -58,6 +60,32 @@ func (s *Server) handleCreateProject(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, projectResponse{Project: p, MediaCount: 0})
 }
 
+func (s *Server) handleDeleteProject(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if _, err := s.Projects.Get(id); err != nil {
+		writeProjectError(w, err)
+		return
+	}
+	if chats, err := s.Projects.ListChats(id); err == nil && s.Sessions != nil {
+		for _, chat := range chats {
+			s.Sessions.Delete(chat.ID)
+		}
+	}
+	if s.Sessions != nil {
+		s.Sessions.DeleteProject(id)
+	}
+	if s.Indexer != nil {
+		if err := s.Indexer.RemoveProject(r.Context(), id); err != nil {
+			s.log().Error("delete project index", "project", id, "err", err)
+		}
+	}
+	if err := s.Projects.Delete(id); err != nil {
+		writeProjectError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func (s *Server) handleGetProject(w http.ResponseWriter, r *http.Request) {
 	p, err := s.Projects.Get(r.PathValue("id"))
 	if err != nil {
@@ -72,7 +100,52 @@ func (s *Server) handleGetProject(w http.ResponseWriter, r *http.Request) {
 	s.attachDurations(p.ID, media)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"project": projectResponse{Project: p, MediaCount: len(media)},
-		"media":   mediaResponses(p.ID, media),
+		"media":   s.mediaResponses(p.ID, media),
+	})
+}
+
+func (s *Server) handleSearchMedia(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if _, err := s.Projects.Get(id); err != nil {
+		writeProjectError(w, err)
+		return
+	}
+	query := strings.TrimSpace(r.URL.Query().Get("q"))
+	if query == "" {
+		query = strings.TrimSpace(r.URL.Query().Get("query"))
+	}
+	if query == "" {
+		writeJSON(w, http.StatusOK, map[string]any{"query": "", "results": []any{}})
+		return
+	}
+	limit, _ := strconv.Atoi(strings.TrimSpace(r.URL.Query().Get("limit")))
+	if s.Indexer == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"query": query, "results": []any{}})
+		return
+	}
+	hits, err := s.Indexer.SearchAll(r.Context(), id, query, limit)
+	if err != nil {
+		if strings.Contains(err.Error(), "not configured") {
+			writeJSON(w, http.StatusOK, map[string]any{"query": query, "results": []any{}})
+			return
+		}
+		writeError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	results := make([]map[string]any, 0, len(hits))
+	for _, hit := range hits {
+		item := map[string]any{"score": hit.Score}
+		for _, key := range []string{"kind", "path", "name", "text_en", "spoken_en", "start", "end", "scene_id"} {
+			if v, ok := hit.Payload[key]; ok {
+				item[key] = v
+			}
+		}
+		results = append(results, item)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"query":   query,
+		"count":   len(results),
+		"results": results,
 	})
 }
 
@@ -84,7 +157,7 @@ func (s *Server) handleListMedia(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.attachDurations(id, media)
-	writeJSON(w, http.StatusOK, map[string]any{"media": mediaResponses(id, media)})
+	writeJSON(w, http.StatusOK, map[string]any{"media": s.mediaResponses(id, media)})
 }
 
 func (s *Server) handleUploadMedia(w http.ResponseWriter, r *http.Request) {
@@ -135,13 +208,10 @@ func (s *Server) handleUploadMedia(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.attachDurations(id, uploaded)
-	for _, m := range uploaded {
-		if m.Kind == "video" || m.Kind == "audio" {
-			mediaPath := m.Path
-			go s.triggerIngestion(id, mediaPath)
-		}
+	for _, media := range uploaded {
+		s.indexMedia(id, media.Path)
 	}
-	writeJSON(w, http.StatusCreated, map[string]any{"media": mediaResponses(id, uploaded)})
+	writeJSON(w, http.StatusCreated, map[string]any{"media": s.mediaResponses(id, uploaded)})
 }
 
 func (s *Server) handleProjectFile(w http.ResponseWriter, r *http.Request) {
@@ -212,6 +282,9 @@ func (s *Server) handleDeleteProjectFile(w http.ResponseWriter, r *http.Request)
 		writeProjectError(w, err)
 		return
 	}
+	if s.Indexer != nil {
+		_ = s.Indexer.RemovePath(r.Context(), id, removedPath)
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -229,6 +302,9 @@ func (s *Server) handleListChats(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeProjectError(w, err)
 		return
+	}
+	if chats == nil {
+		chats = []projects.ChatMeta{}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"chats": chats})
 }
@@ -248,7 +324,7 @@ func (s *Server) handleCreateChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_ = s.Projects.Touch(id)
-	writeJSON(w, http.StatusCreated, chatResponse(chat, false))
+	writeJSON(w, http.StatusCreated, chatResponse(id, chat, false))
 }
 
 func (s *Server) handleGetChat(w http.ResponseWriter, r *http.Request) {
@@ -257,7 +333,7 @@ func (s *Server) handleGetChat(w http.ResponseWriter, r *http.Request) {
 		writeProjectError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, chatResponse(chat, true))
+	writeJSON(w, http.StatusOK, chatResponse(r.PathValue("id"), chat, true))
 }
 
 func (s *Server) handlePatchChat(w http.ResponseWriter, r *http.Request) {
@@ -272,7 +348,7 @@ func (s *Server) handlePatchChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_ = s.Projects.Touch(r.PathValue("id"))
-	writeJSON(w, http.StatusOK, chatResponse(chat, false))
+	writeJSON(w, http.StatusOK, chatResponse(r.PathValue("id"), chat, false))
 }
 
 func (s *Server) handleDeleteChat(w http.ResponseWriter, r *http.Request) {
@@ -328,7 +404,7 @@ func (s *Server) handlePutTimeline(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, saved)
 }
 
-func chatResponse(chat projects.Chat, includeMessages bool) map[string]any {
+func chatResponse(projectID string, chat projects.Chat, includeMessages bool) map[string]any {
 	out := map[string]any{
 		"id":         chat.ID,
 		"title":      chat.Title,
@@ -336,7 +412,7 @@ func chatResponse(chat projects.Chat, includeMessages bool) map[string]any {
 		"updated_at": chat.UpdatedAt,
 	}
 	if includeMessages {
-		out["messages"] = projects.PublicChatMessages(chat.Messages, chat.ResponseDurations, chat.ResponseTraces)
+		out["messages"] = projects.PublicChatMessages(projectID, chat.Messages, chat.ResponseDurations, chat.ResponseTraces)
 	}
 	return out
 }
@@ -349,14 +425,23 @@ func projectFileURL(projectID, path string) string {
 	return "/v1/projects/" + url.PathEscape(projectID) + "/files/" + strings.Join(parts, "/")
 }
 
-func mediaResponses(projectID string, media []projects.Media) []mediaResponse {
+func (s *Server) mediaResponses(projectID string, media []projects.Media) []mediaResponse {
+	var statuses map[string]transcript.JobStatus
+	if s != nil && s.Indexer != nil {
+		statuses = s.Indexer.Statuses(projectID)
+	}
 	out := make([]mediaResponse, 0, len(media))
 	for _, item := range media {
 		u := projectFileURL(projectID, item.Path)
 		if !item.ModifiedAt.IsZero() {
 			u += "?t=" + url.QueryEscape(fmt.Sprintf("%d-%d", item.ModifiedAt.UnixMilli(), item.Bytes))
 		}
-		out = append(out, mediaResponse{Media: item, ContentURL: u})
+		itemOut := mediaResponse{Media: item, ContentURL: u}
+		if st, ok := statuses[item.Path]; ok {
+			copy := st
+			itemOut.Transcript = &copy
+		}
+		out = append(out, itemOut)
 	}
 	return out
 }

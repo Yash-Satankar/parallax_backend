@@ -4,17 +4,19 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
 	"parallax/internal/agent"
-	"parallax/internal/collab"
 	"parallax/internal/config"
+	"parallax/internal/elevenlabs"
 	"parallax/internal/ffmpeg"
+	"parallax/internal/gemini"
 	"parallax/internal/llm"
 	"parallax/internal/projects"
-	"parallax/internal/search"
 	"parallax/internal/tools"
+	"parallax/internal/transcript"
 )
 
 // ProviderFactory builds a ChatProvider from the current LLM settings.
@@ -22,21 +24,65 @@ import (
 type ProviderFactory func(cfg config.LLM) llm.ChatProvider
 
 type Server struct {
-	Addr         string
-	Settings     *config.Store
-	Sessions     *agent.Store
-	Tools        *tools.Registry
-	SystemPrompt string
-	ExaAPIKey    string
-	ExaBaseURL   string
-	Bins         ffmpeg.Bins
-	Projects     *projects.Store
-	NewLLM       ProviderFactory
-	MaxIters     int
-	Logger       *slog.Logger
-	Workspace    string
-	CollabHub    *collab.Hub
-	SearchMgr    *search.Manager
+	Addr                    string
+	Settings                *config.Store
+	Sessions                *agent.Store
+	Tools                   *tools.Registry
+	SystemPrompt            string
+	ExaAPIKey               string
+	ExaBaseURL              string
+	GeminiAPIKey            string
+	GeminiBaseURL           string
+	GeminiImageModel        string
+	GeminiOmniVideoModel    string
+	GeminiVeoVideoModel     string
+	GeminiVideoTimeout      time.Duration
+	GeminiVideoPoll         time.Duration
+	GeminiMusic             *gemini.Client
+	GeminiMusicModel        string
+	GeminiMusicOutputFormat string
+	Bins                    ffmpeg.Bins
+	Projects                *projects.Store
+	NewLLM                  ProviderFactory
+	MaxIters                int
+	Logger                  *slog.Logger
+	Workspace               string
+	Indexer                 *transcript.Indexer
+	ElevenLabs              *elevenlabs.Client
+	ElevenVoices            *elevenlabs.VoiceCatalog
+	ElevenTTSModel          string
+	ElevenSFXModel          string
+	ElevenTTSOutputFormat   string
+	ElevenSFXOutputFormat   string
+	ElevenLimiter           *tools.Limiter
+}
+
+func (s *Server) indexMedia(projectID, rel string) {
+	if s == nil || s.Indexer == nil {
+		return
+	}
+	s.Indexer.Enqueue(projectID, rel)
+}
+
+func (s *Server) indexGeneratedImage(projectID, rel, prompt string) {
+	if s == nil || s.Indexer == nil {
+		return
+	}
+	s.Indexer.SetImageHint(projectID, rel, prompt)
+	s.Indexer.Enqueue(projectID, rel)
+}
+
+func (s *Server) indexProject(projectID string) {
+	if s == nil || s.Projects == nil {
+		return
+	}
+	media, err := s.Projects.ListMedia(projectID)
+	if err != nil {
+		return
+	}
+	for _, item := range media {
+		s.indexMedia(projectID, item.Path)
+	}
 }
 
 func (s *Server) systemPrompt() string {
@@ -65,6 +111,8 @@ func (s *Server) Handler() http.Handler {
 		mux.HandleFunc("GET /v1/projects", s.handleListProjects)
 		mux.HandleFunc("POST /v1/projects", s.handleCreateProject)
 		mux.HandleFunc("GET /v1/projects/{id}", s.handleGetProject)
+		mux.HandleFunc("DELETE /v1/projects/{id}", s.handleDeleteProject)
+		mux.HandleFunc("GET /v1/projects/{id}/media/search", s.handleSearchMedia)
 		mux.HandleFunc("GET /v1/projects/{id}/media", s.handleListMedia)
 		mux.HandleFunc("POST /v1/projects/{id}/media", s.handleUploadMedia)
 		mux.HandleFunc("POST /v1/projects/{id}/export", s.handleExport)
@@ -84,12 +132,8 @@ func (s *Server) Handler() http.Handler {
 		mux.HandleFunc("POST /v1/projects/{id}/checkpoints", s.handleCreateCheckpoint)
 		mux.HandleFunc("PATCH /v1/projects/{id}/checkpoints/{checkpoint}", s.handleRenameCheckpoint)
 		mux.HandleFunc("DELETE /v1/projects/{id}/checkpoints/{checkpoint}", s.handleDeleteCheckpoint)
-		// Real-time collaboration WebSocket
-		mux.HandleFunc("GET /v1/projects/{id}/collab", s.handleCollab)
-		// Semantic footage search
-		mux.HandleFunc("GET /v1/projects/{id}/search", s.handleProjectSearch)
 	}
-	return withCORS(withLog(s.log(), withRecovery(s.log(), mux)))
+	return withCORS(withLog(s.log(), mux))
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
@@ -131,8 +175,20 @@ type chatRequest struct {
 	ProfileID      string        `json:"profile_id"`
 	Message        string        `json:"message"`
 	Messages       []llm.Message `json:"messages"`
+	Images         []chatImageIn `json:"images"`
 	ThinkingEffort string        `json:"thinking_effort"`
 }
+
+type chatImageIn struct {
+	Name string `json:"name"`
+	MIME string `json:"mime"`
+	Data string `json:"data"`
+}
+
+const (
+	maxChatImages     = 6
+	maxChatImageBytes = 8 << 20
+)
 
 func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	requestStartedAt := time.Now()
@@ -144,14 +200,15 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	}
 
 	userText := strings.TrimSpace(req.Message)
-	if userText == "" && len(req.Messages) == 0 {
+	if userText == "" && len(req.Messages) == 0 && len(req.Images) == 0 {
 		writeError(w, http.StatusBadRequest, "message is required")
 		return
 	}
 
 	llmCfg, err := s.Settings.GetByID(req.ProfileID)
 	if err != nil {
-		llmCfg = s.Settings.Get()
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
 	}
 	if err := config.ValidateLLM(llmCfg); err != nil {
 		writeError(w, http.StatusFailedDependency, "LLM is not configured: "+err.Error())
@@ -165,6 +222,11 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 
 	toolRegistry := s.Tools
 	projectID := strings.TrimSpace(req.ProjectID)
+	attached, attachErr := s.saveChatImages(projectID, req.Images)
+	if attachErr != nil {
+		writeError(w, http.StatusBadRequest, attachErr.Error())
+		return
+	}
 	var timelineTx *projects.TimelineTransaction
 	if projectID != "" {
 		if s.Projects == nil {
@@ -177,57 +239,66 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		toolRegistry = tools.NewRegistry()
+		summary := userText
+		if summary == "" && len(attached) > 0 {
+			summary = "Attached image"
+		}
 		timelineTx, err = s.Projects.BeginTimelineTransaction(projectID, projects.CommitMeta{
-			Actor: "agent", Summary: userText, ChatID: strings.TrimSpace(req.SessionID),
+			Actor: "agent", Summary: summary, ChatID: strings.TrimSpace(req.SessionID),
 		})
 		if err != nil {
 			writeProjectError(w, err)
 			return
 		}
-		tools.RegisterMedia(toolRegistry, tools.MediaEnv{Workspace: project.Dir, Bins: s.Bins, OnMutation: timelineTx.MarkMediaMutation})
+		tools.RegisterMedia(toolRegistry, tools.MediaEnv{
+			Workspace:  project.Dir,
+			Bins:       s.Bins,
+			OnMutation: timelineTx.MarkMediaMutation,
+			OnApplied:  func(rel string) { s.indexMedia(projectID, rel) },
+		})
 		tools.RegisterWeb(toolRegistry, tools.WebEnv{APIKey: s.ExaAPIKey, BaseURL: s.ExaBaseURL})
+		tools.RegisterImage(toolRegistry, tools.ImageEnv{
+			Workspace:  project.Dir,
+			APIKey:     s.GeminiAPIKey,
+			BaseURL:    s.GeminiBaseURL,
+			Model:      s.GeminiImageModel,
+			OnMutation: timelineTx.MarkMediaMutation,
+			OnApplied:  func(rel, prompt string) { s.indexGeneratedImage(projectID, rel, prompt) },
+		})
+		videoClient := gemini.NewClient(s.GeminiAPIKey, s.GeminiBaseURL, s.GeminiVideoTimeout, 256<<20)
+		tools.RegisterVideoGeneration(toolRegistry, tools.VideoGenerationEnv{
+			Workspace:  project.Dir,
+			Bins:       s.Bins,
+			Client:     videoClient,
+			OmniModel:  s.GeminiOmniVideoModel,
+			VeoModel:   s.GeminiVeoVideoModel,
+			Poll:       s.GeminiVideoPoll,
+			OnMutation: timelineTx.MarkMediaMutation,
+			OnApplied:  func(rel string) { s.indexMedia(projectID, rel) },
+		})
+		tools.RegisterAudioGeneration(toolRegistry, tools.AudioGenerationEnv{
+			Workspace: project.Dir, Bins: s.Bins, Client: s.ElevenLabs, Voices: s.ElevenVoices,
+			MusicClient: s.GeminiMusic, GeminiMusicModel: s.GeminiMusicModel, GeminiMusicOutputFormat: s.GeminiMusicOutputFormat,
+			TTSModel: s.ElevenTTSModel, SFXModel: s.ElevenSFXModel,
+			TTSOutputFormat: s.ElevenTTSOutputFormat, SFXOutputFormat: s.ElevenSFXOutputFormat,
+			Limiter: s.ElevenLimiter, ProjectID: projectID, Transaction: timelineTx, Indexer: s.Indexer,
+			Logger: s.Logger, OnMutation: timelineTx.MarkMediaMutation,
+		})
 		tools.RegisterTimeline(toolRegistry, tools.TimelineEnv{
 			Transaction: timelineTx,
 			Store:       s.Projects,
 			ProjectID:   projectID,
 			Workspace:   project.Dir,
 			Bins:        s.Bins,
-			CollabHub:   s.CollabHub,
 		})
-		tools.RegisterAudio(toolRegistry, tools.AudioEnv{
-			Workspace:  project.Dir,
-			Bins:       s.Bins,
-			SearchMgr:  s.SearchMgr,
-			OnMutation: timelineTx.MarkMediaMutation,
-		})
-		embedClient := s.buildEmbedClient(llmCfg)
-		tools.RegisterSearch(toolRegistry, tools.SearchEnv{
+		tools.RegisterTranscript(toolRegistry, tools.TranscriptEnv{
+			Indexer:     s.Indexer,
+			ProjectID:   projectID,
 			Workspace:   project.Dir,
-			SearchMgr:   s.SearchMgr,
-			EmbedClient: embedClient,
-		})
-		transcribeClient := s.buildTranscribeClient(llmCfg)
-		tools.RegisterCaptions(toolRegistry, tools.CaptionsEnv{
-			Transaction:      timelineTx,
-			Store:            s.Projects,
-			ProjectID:        projectID,
-			Workspace:        project.Dir,
-			Bins:             s.Bins,
-			TranscribeClient: transcribeClient,
-			CollabHub:        s.CollabHub,
-		})
-		var visionClient llm.ChatProvider
-		if s.NewLLM != nil {
-			visionClient = s.NewLLM(llmCfg)
-		}
-		tools.RegisterReframe(toolRegistry, tools.ReframeEnv{
-			Transaction:  timelineTx,
-			Store:        s.Projects,
-			ProjectID:    projectID,
-			Workspace:    project.Dir,
-			Bins:         s.Bins,
-			VisionClient: visionClient,
-			CollabHub:    s.CollabHub,
+			Bins:        s.Bins,
+			Transaction: timelineTx,
+			OnMutation:  timelineTx.MarkMediaMutation,
+			OnApplied:   func(rel string) { s.indexMedia(projectID, rel) },
 		})
 	}
 	if toolRegistry == nil {
@@ -271,13 +342,13 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 			msgs = append(msgs, m)
 		}
 	}
-	if userText != "" {
+	if userText != "" || len(attached) > 0 {
 		lastUser := false
-		if n := len(msgs); n > 0 && msgs[n-1].Role == llm.RoleUser && msgs[n-1].Content == userText {
+		if n := len(msgs); n > 0 && msgs[n-1].Role == llm.RoleUser && msgs[n-1].Content == userText && len(attached) == 0 {
 			lastUser = true
 		}
 		if !lastUser {
-			msgs = append(msgs, llm.Message{Role: llm.RoleUser, Content: userText})
+			msgs = append(msgs, llm.Message{Role: llm.RoleUser, Content: userText, Images: attached})
 		}
 	}
 	if projectID != "" {
@@ -302,6 +373,16 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	}
 	var traceEvents []projects.ChatTraceEvent
 
+	if projectID != "" && s.Projects != nil {
+		msgs = llm.HydrateMessageImages(msgs, func(rel string) ([]byte, error) {
+			abs, err := s.Projects.ResolveFile(projectID, rel)
+			if err != nil {
+				return nil, err
+			}
+			return os.ReadFile(abs)
+		})
+	}
+
 	ag := &agent.Agent{
 		Provider: provider,
 		Tools:    toolRegistry,
@@ -314,7 +395,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		ThinkingEffort: thinkingEffort,
 	}, func(ev agent.Event) {
 		if ev.Type != agent.EventText && ev.Type != agent.EventSession && ev.Type != agent.EventProjectChanged {
-			traceEvents = append(traceEvents, projects.ChatTraceEvent{Type: string(ev.Type), Data: append([]byte(nil), ev.Data...)})
+			traceEvents = appendTraceEvent(traceEvents, ev)
 		}
 		_ = stream.Event(ev)
 	})
@@ -341,6 +422,49 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		}
 		_ = s.Projects.Touch(projectID)
 	}
+}
+
+func appendTraceEvent(events []projects.ChatTraceEvent, ev agent.Event) []projects.ChatTraceEvent {
+	if ev.Type != agent.EventThinking {
+		return append(events, projects.ChatTraceEvent{Type: string(ev.Type), Data: append([]byte(nil), ev.Data...)})
+	}
+	var incoming agent.ThinkingPayload
+	if json.Unmarshal(ev.Data, &incoming) != nil {
+		return events
+	}
+	if incoming.Delta == "" && incoming.Text == "" {
+		return events
+	}
+	for i := len(events) - 1; i >= 0; i-- {
+		if events[i].Type != string(agent.EventThinking) {
+			continue
+		}
+		var existing agent.ThinkingPayload
+		if json.Unmarshal(events[i].Data, &existing) != nil || existing.Iteration != incoming.Iteration {
+			break
+		}
+		if incoming.Text != "" {
+			existing.Text = incoming.Text
+		} else {
+			existing.Text += incoming.Delta
+		}
+		existing.Delta = ""
+		raw, err := json.Marshal(existing)
+		if err != nil {
+			return events
+		}
+		events[i].Data = raw
+		return events
+	}
+	stored := agent.ThinkingPayload{Text: incoming.Text, Iteration: incoming.Iteration}
+	if stored.Text == "" {
+		stored.Text = incoming.Delta
+	}
+	raw, err := json.Marshal(stored)
+	if err != nil {
+		return events
+	}
+	return append(events, projects.ChatTraceEvent{Type: string(ev.Type), Data: raw})
 }
 
 func (s *Server) handleGetSession(w http.ResponseWriter, r *http.Request) {
@@ -387,20 +511,3 @@ func withLog(log *slog.Logger, next http.Handler) http.Handler {
 		)
 	})
 }
-
-func withRecovery(log *slog.Logger, next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		defer func() {
-			if rec := recover(); rec != nil {
-				log.Error("http handler panic",
-					"method", r.Method,
-					"path", r.URL.Path,
-					"err", rec,
-				)
-				writeError(w, http.StatusInternalServerError, "internal server error")
-			}
-		}()
-		next.ServeHTTP(w, r)
-	})
-}
-

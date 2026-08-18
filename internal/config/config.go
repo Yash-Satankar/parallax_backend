@@ -14,13 +14,14 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 const (
 	DefaultAddr      = ":8080"
 	DefaultBaseURL   = "https://api.x.ai/v1"
 	DefaultModel     = "grok-4.6"
-	DefaultMaxIters  = 12
+	DefaultMaxIters  = 50
 	defaultProfileID = "default"
 )
 
@@ -31,20 +32,6 @@ type LLM struct {
 	BaseURL string `json:"base_url"`
 	APIKey  string `json:"api_key"`
 	Model   string `json:"model"`
-
-	// Optional: embedding model endpoint (OpenAI-compat /v1/embeddings).
-	// Falls back to BaseURL+APIKey when EmbeddingBaseURL is empty.
-	EmbeddingModel   string `json:"embedding_model,omitempty"`
-	EmbeddingBaseURL string `json:"embedding_base_url,omitempty"`
-
-	// Optional: transcription model endpoint (OpenAI-compat /v1/audio/transcriptions).
-	// Falls back to BaseURL+APIKey when TranscribeBaseURL is empty.
-	TranscribeModel   string `json:"transcribe_model,omitempty"`
-	TranscribeBaseURL string `json:"transcribe_base_url,omitempty"`
-
-	// Optional: TTS model endpoint (OpenAI-compat /v1/audio/speech).
-	TTSModel   string `json:"tts_model,omitempty"`
-	TTSBaseURL string `json:"tts_base_url,omitempty"`
 }
 
 // Settings is the in-memory multi-model snapshot.
@@ -55,24 +42,53 @@ type Settings struct {
 
 // Config is the process-wide snapshot used at startup.
 type Config struct {
-	Addr         string
-	WorkspaceDir string
-	DataDir      string
-	SettingsPath string
-	ExaAPIKey    string
-	ExaBaseURL   string
-	MaxIters     int
-	FFmpegBin    string
-	FFprobeBin   string
-	LLMs         []LLM
+	Addr                       string
+	WorkspaceDir               string
+	DataDir                    string
+	SettingsPath               string
+	ExaAPIKey                  string
+	ExaBaseURL                 string
+	GeminiAPIKey               string
+	GeminiBaseURL              string
+	GeminiImageModel           string
+	GeminiMusicModel           string
+	GeminiMusicOutputFormat    string
+	GeminiOmniVideoModel       string
+	GeminiVeoVideoModel        string
+	GeminiVideoTimeout         time.Duration
+	GeminiVideoPoll            time.Duration
+	ElevenLabsAPIKey           string
+	ElevenLabsBaseURL          string
+	ElevenLabsTTSModel         string
+	ElevenLabsSFXModel         string
+	ElevenLabsTTSOutputFormat  string
+	ElevenLabsSFXOutputFormat  string
+	ElevenLabsVoicesFile       string
+	ElevenLabsRequestTimeout   time.Duration
+	ElevenLabsMaxConcurrency   int
+	ElevenLabsMaxResponseBytes int64
+	MaxIters                   int
+	FFmpegBin                  string
+	FFprobeBin                 string
+	FFmpegHWAccel              string
+	FFmpegHWDevice             string
+	LLMs                       []LLM
+	Embedding                  Embedding
+	QdrantURL                  string
+	QdrantAPIKey               string
+	WhisperModel               string
+	WhisperDevice              string
+	WhisperPython              string
+	WhisperScript              string
+	WhisperCompute             string
+}
 
-	// Search / AI features (optional; features degrade gracefully when unset)
-	EmbeddingModel   string // e.g. "text-embedding-3-small"
-	EmbeddingBaseURL string // defaults to active LLM base URL
-	TranscribeModel  string // e.g. "whisper-1"
-	TranscribeBaseURL string
-	TTSModel         string // e.g. "tts-1"
-	TTSBaseURL       string
+// Embedding is a separate OpenAI-compatible /v1/embeddings endpoint.
+// It must not reuse LLM_* credentials.
+type Embedding struct {
+	BaseURL string
+	APIKey  string
+	Model   string
 }
 
 // Load reads optional .env files, then environment variables.
@@ -98,26 +114,68 @@ func Load() (Config, error) {
 	}
 
 	cfg := Config{
-		Addr:              envOr("PARALLAX_ADDR", DefaultAddr),
-		WorkspaceDir:      workspace,
-		DataDir:           data,
-		SettingsPath:      filepath.Join(data, "settings.json"),
-		ExaAPIKey:         strings.TrimSpace(os.Getenv("EXA_API_KEY")),
-		ExaBaseURL:        envOr("EXA_BASE_URL", "https://api.exa.ai"),
-		MaxIters:          envInt("PARALLAX_MAX_ITERS", DefaultMaxIters),
-		FFmpegBin:         envOr("FFMPEG_BIN", "ffmpeg"),
-		FFprobeBin:        envOr("FFPROBE_BIN", "ffprobe"),
-		LLMs:              LoadLLMProfiles(),
-		EmbeddingModel:    strings.TrimSpace(os.Getenv("EMBEDDING_MODEL")),
-		EmbeddingBaseURL:  strings.TrimSpace(os.Getenv("EMBEDDING_BASE_URL")),
-		TranscribeModel:   envOr("TRANSCRIBE_MODEL", "whisper-1"),
-		TranscribeBaseURL: strings.TrimSpace(os.Getenv("TRANSCRIBE_BASE_URL")),
-		TTSModel:          envOr("TTS_MODEL", "tts-1"),
-		TTSBaseURL:        strings.TrimSpace(os.Getenv("TTS_BASE_URL")),
+		Addr:                       envOr("PARALLAX_ADDR", DefaultAddr),
+		WorkspaceDir:               workspace,
+		DataDir:                    data,
+		SettingsPath:               filepath.Join(data, "settings.json"),
+		ExaAPIKey:                  strings.TrimSpace(os.Getenv("EXA_API_KEY")),
+		ExaBaseURL:                 envOr("EXA_BASE_URL", "https://api.exa.ai"),
+		GeminiAPIKey:               firstNonEmpty(os.Getenv("GEMINI_API_KEY"), os.Getenv("GOOGLE_API_KEY")),
+		GeminiBaseURL:              strings.TrimRight(envOr("GEMINI_API_BASE", "https://generativelanguage.googleapis.com/v1beta"), "/"),
+		GeminiImageModel:           envOr("GEMINI_IMAGE_MODEL", "gemini-3.1-flash-image"),
+		GeminiMusicModel:           envOr("GEMINI_MUSIC_MODEL", "lyria-3-pro-preview"),
+		GeminiMusicOutputFormat:    envOr("GEMINI_MUSIC_OUTPUT_FORMAT", "mp3"),
+		GeminiOmniVideoModel:       envOr("GEMINI_OMNI_VIDEO_MODEL", "gemini-omni-flash-preview"),
+		GeminiVeoVideoModel:        envOr("GEMINI_VEO_VIDEO_MODEL", "veo-3.1-generate-preview"),
+		GeminiVideoTimeout:         time.Duration(envInt("GEMINI_VIDEO_TIMEOUT_SECONDS", 900)) * time.Second,
+		GeminiVideoPoll:            time.Duration(envInt("GEMINI_VIDEO_POLL_SECONDS", 5)) * time.Second,
+		ElevenLabsAPIKey:           strings.TrimSpace(os.Getenv("ELEVENLABS_API_KEY")),
+		ElevenLabsBaseURL:          strings.TrimRight(envOr("ELEVENLABS_BASE_URL", "https://api.elevenlabs.io"), "/"),
+		ElevenLabsTTSModel:         envOr("ELEVENLABS_TTS_MODEL", "eleven_v3"),
+		ElevenLabsSFXModel:         envOr("ELEVENLABS_SFX_MODEL", "eleven_text_to_sound_v2"),
+		ElevenLabsTTSOutputFormat:  envOr("ELEVENLABS_TTS_OUTPUT_FORMAT", "mp3_44100_128"),
+		ElevenLabsSFXOutputFormat:  envOr("ELEVENLABS_SFX_OUTPUT_FORMAT", "mp3_44100_128"),
+		ElevenLabsVoicesFile:       resolveExisting(envOr("ELEVENLABS_TTS_VOICES_FILE", filepath.Join("data", "elevenlabs-voices.json")), cwd),
+		ElevenLabsRequestTimeout:   time.Duration(envInt("ELEVENLABS_REQUEST_TIMEOUT_SECONDS", 900)) * time.Second,
+		ElevenLabsMaxConcurrency:   envInt("ELEVENLABS_MAX_CONCURRENCY", 4),
+		ElevenLabsMaxResponseBytes: int64(envInt("ELEVENLABS_MAX_RESPONSE_BYTES", 256<<20)),
+		MaxIters:                   envInt("PARALLAX_MAX_ITERS", DefaultMaxIters),
+		FFmpegBin:                  envOr("FFMPEG_BIN", "ffmpeg"),
+		FFprobeBin:                 envOr("FFPROBE_BIN", "ffprobe"),
+		FFmpegHWAccel:              strings.ToLower(envOr("FFMPEG_HWACCEL", "auto")),
+		FFmpegHWDevice:             strings.TrimSpace(os.Getenv("FFMPEG_HWDEVICE")),
+		LLMs:                       LoadLLMProfiles(),
+		Embedding: Embedding{
+			BaseURL: strings.TrimRight(strings.TrimSpace(os.Getenv("EMBEDDING_BASE_URL")), "/"),
+			APIKey:  strings.TrimSpace(os.Getenv("EMBEDDING_API_KEY")),
+			Model:   strings.TrimSpace(os.Getenv("EMBEDDING_MODEL")),
+		},
+		QdrantURL:      strings.TrimRight(envOr("QDRANT_URL", "http://127.0.0.1:6333"), "/"),
+		QdrantAPIKey:   strings.TrimSpace(os.Getenv("QDRANT_API_KEY")),
+		WhisperModel:   envOr("WHISPER_MODEL", "large-v3-turbo"),
+		WhisperDevice:  strings.ToLower(envOr("WHISPER_DEVICE", "auto")),
+		WhisperPython:  resolveExisting(envOr("WHISPER_PYTHON", filepath.Join("scripts", ".venv", "bin", "python")), cwd),
+		WhisperScript:  resolveExisting(envOr("WHISPER_SCRIPT", filepath.Join("scripts", "transcribe.py")), cwd),
+		WhisperCompute: envOr("WHISPER_COMPUTE", "int8"),
 	}
 
 	if cfg.MaxIters < 1 {
 		cfg.MaxIters = DefaultMaxIters
+	}
+	if cfg.ElevenLabsRequestTimeout < time.Second {
+		cfg.ElevenLabsRequestTimeout = 15 * time.Minute
+	}
+	if cfg.ElevenLabsMaxConcurrency < 1 {
+		cfg.ElevenLabsMaxConcurrency = 4
+	}
+	if cfg.ElevenLabsMaxResponseBytes < 1<<20 {
+		cfg.ElevenLabsMaxResponseBytes = 256 << 20
+	}
+	if cfg.GeminiVideoTimeout < time.Second {
+		cfg.GeminiVideoTimeout = 15 * time.Minute
+	}
+	if cfg.GeminiVideoPoll < time.Second {
+		cfg.GeminiVideoPoll = 5 * time.Second
 	}
 
 	if err := os.MkdirAll(cfg.WorkspaceDir, 0o755); err != nil {
@@ -180,6 +238,23 @@ func ValidateLLM(l LLM) error {
 	}
 	if !strings.HasPrefix(l.BaseURL, "http://") && !strings.HasPrefix(l.BaseURL, "https://") {
 		return errors.New("base_url must start with http:// or https://")
+	}
+	return nil
+}
+
+// ValidateEmbedding checks the dedicated embeddings endpoint.
+func ValidateEmbedding(e Embedding) error {
+	if strings.TrimSpace(e.BaseURL) == "" {
+		return errors.New("embedding base_url is required")
+	}
+	if strings.TrimSpace(e.Model) == "" {
+		return errors.New("embedding model is required")
+	}
+	if strings.TrimSpace(e.APIKey) == "" {
+		return errors.New("embedding api_key is required")
+	}
+	if !strings.HasPrefix(e.BaseURL, "http://") && !strings.HasPrefix(e.BaseURL, "https://") {
+		return errors.New("embedding base_url must start with http:// or https://")
 	}
 	return nil
 }
@@ -346,14 +421,10 @@ func LoadLLMProfiles() []LLM {
 	}
 
 	return normalizeProfiles([]LLM{{
-		ID:               defaultProfileID,
-		BaseURL:          envOr("LLM_BASE_URL", DefaultBaseURL),
-		APIKey:           firstNonEmpty(os.Getenv("LLM_API_KEY"), os.Getenv("XAI_API_KEY")),
-		Model:            envOr("LLM_MODEL", DefaultModel),
-		EmbeddingModel:   strings.TrimSpace(os.Getenv("EMBEDDING_MODEL")),
-		EmbeddingBaseURL: strings.TrimSpace(os.Getenv("EMBEDDING_BASE_URL")),
-		TranscribeModel:  envOr("TRANSCRIBE_MODEL", "whisper-1"),
-		TTSModel:         envOr("TTS_MODEL", "tts-1"),
+		ID:      defaultProfileID,
+		BaseURL: envOr("LLM_BASE_URL", DefaultBaseURL),
+		APIKey:  firstNonEmpty(os.Getenv("LLM_API_KEY"), os.Getenv("XAI_API_KEY")),
+		Model:   envOr("LLM_MODEL", DefaultModel),
 	}})
 }
 
@@ -387,12 +458,6 @@ func normalizeProfile(l LLM, fallbackID string) LLM {
 	l.BaseURL = strings.TrimRight(strings.TrimSpace(l.BaseURL), "/")
 	l.APIKey = strings.TrimSpace(l.APIKey)
 	l.Model = strings.TrimSpace(l.Model)
-	l.EmbeddingModel = strings.TrimSpace(l.EmbeddingModel)
-	l.EmbeddingBaseURL = strings.TrimRight(strings.TrimSpace(l.EmbeddingBaseURL), "/")
-	l.TranscribeModel = strings.TrimSpace(l.TranscribeModel)
-	l.TranscribeBaseURL = strings.TrimRight(strings.TrimSpace(l.TranscribeBaseURL), "/")
-	l.TTSModel = strings.TrimSpace(l.TTSModel)
-	l.TTSBaseURL = strings.TrimRight(strings.TrimSpace(l.TTSBaseURL), "/")
 	return l
 }
 
@@ -425,6 +490,40 @@ func findProfile(profiles []LLM, id string) (LLM, bool) {
 func hasProfileID(profiles []LLM, id string) bool {
 	_, ok := findProfile(profiles, id)
 	return ok
+}
+
+// resolveExisting turns a relative whisper path into an absolute one.
+// The server is often started from the repo root, not parallax_backend/.
+func resolveExisting(path, cwd string) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return ""
+	}
+	if filepath.IsAbs(path) {
+		return path
+	}
+	candidates := []string{
+		filepath.Join(cwd, path),
+		filepath.Join(cwd, "parallax_backend", path),
+	}
+	if exe, err := os.Executable(); err == nil {
+		dir := filepath.Dir(exe)
+		candidates = append(candidates, filepath.Join(dir, path), filepath.Join(dir, "..", path))
+	}
+	for _, cand := range candidates {
+		abs, err := filepath.Abs(cand)
+		if err != nil {
+			continue
+		}
+		if _, err := os.Stat(abs); err == nil {
+			return abs
+		}
+	}
+	abs, err := filepath.Abs(filepath.Join(cwd, path))
+	if err != nil {
+		return path
+	}
+	return abs
 }
 
 func envOr(key, fallback string) string {
