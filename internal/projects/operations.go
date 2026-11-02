@@ -335,6 +335,17 @@ func (tx *TimelineTransaction) Focus(id string, frame int) {
 	tx.dirty = true
 }
 
+// SetCanvas changes the output resolution, e.g. after reframing to 9:16.
+func (tx *TimelineTransaction) SetCanvas(canvas TimelineCanvas) {
+	tx.mu.Lock()
+	defer tx.mu.Unlock()
+	if tx.closed || canvas.Width < 16 || canvas.Height < 16 || canvas.Width > 16384 || canvas.Height > 16384 {
+		return
+	}
+	tx.doc.Canvas = canvas
+	tx.dirty = true
+}
+
 func (tx *TimelineTransaction) Apply(operations []TimelineOperation) (OperationResult, error) {
 	tx.mu.Lock()
 	defer tx.mu.Unlock()

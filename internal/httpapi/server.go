@@ -657,6 +657,20 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 			OnMutation:  timelineTx.MarkMediaMutation,
 			OnApplied:   mediaApplied,
 		})
+		tools.RegisterAudio(toolRegistry, tools.AudioEnv{
+			Workspace:  project.Dir,
+			Bins:       s.Bins,
+			OnMutation: timelineTx.MarkMediaMutation,
+			OnApplied:  mediaApplied,
+		})
+		tools.RegisterReframe(toolRegistry, tools.ReframeEnv{
+			Transaction:  timelineTx,
+			Store:        s.Projects,
+			ProjectID:    projectID,
+			Workspace:    project.Dir,
+			Bins:         s.Bins,
+			VisionClient: provider,
+		})
 		tools.RegisterBlender(toolRegistry, tools.BlenderEnv{
 			Workspace: project.Dir, BlenderBin: s.BlenderBin,
 			BridgeHost: s.BlenderBridgeHost, BridgePort: s.BlenderBridgePort,

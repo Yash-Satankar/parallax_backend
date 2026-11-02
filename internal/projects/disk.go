@@ -1,11 +1,8 @@
 package projects
 
 import (
-	"errors"
 	"fmt"
-	"os"
 	"strings"
-	"syscall"
 )
 
 const diskSlackBytes = 64 << 20
@@ -36,25 +33,11 @@ func IsNoSpace(err error) bool {
 	if err == nil {
 		return false
 	}
-	if errors.Is(err, syscall.ENOSPC) {
+	if isNoSpacePlatform(err) {
 		return true
 	}
 	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, "no space left") || strings.Contains(msg, "not enough disk space")
-}
-
-func freeBytes(path string) (int64, error) {
-	if _, err := os.Stat(path); err != nil {
-		if !os.IsNotExist(err) {
-			return 0, err
-		}
-		path = "."
-	}
-	var st syscall.Statfs_t
-	if err := syscall.Statfs(path, &st); err != nil {
-		return 0, err
-	}
-	return int64(st.Bavail) * int64(st.Bsize), nil
+	return strings.Contains(msg, "no space left") || strings.Contains(msg, "not enough disk space") || strings.Contains(msg, "there is not enough space on the disk")
 }
 
 // FreeBytes returns the available bytes on path's filesystem.

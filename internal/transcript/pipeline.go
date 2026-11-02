@@ -31,6 +31,10 @@ type Indexer struct {
 	// ImageWorkers is how many stills to caption at once. Zero means 6.
 	// Speech and video stay serial so the GPU is not shared.
 	ImageWorkers int
+	// WhisperMinDuration and WhisperMaxDuration skip speech outside this
+	// range of seconds. 0 means no limit.
+	WhisperMinDuration float64
+	WhisperMaxDuration float64
 
 	mu      sync.Mutex
 	diskMu  sync.Mutex
@@ -374,6 +378,17 @@ func (x *Indexer) index(ctx context.Context, projectID, rel string, describe boo
 	return first
 }
 
+// shouldTranscribe reports whether speech of this length is in the configured range.
+func (x *Indexer) shouldTranscribe(duration float64) bool {
+	if x.WhisperMinDuration > 0 && duration < x.WhisperMinDuration {
+		return false
+	}
+	if x.WhisperMaxDuration > 0 && duration > x.WhisperMaxDuration {
+		return false
+	}
+	return true
+}
+
 func (x *Indexer) indexSpeech(ctx context.Context, projectID, rel string) (*Document, error) {
 	project, err := x.Projects.Get(projectID)
 	if err != nil {
@@ -416,6 +431,13 @@ func (x *Indexer) indexSpeech(ctx context.Context, projectID, rel string) (*Docu
 	}
 
 	if doc == nil || len(doc.Segments) == 0 {
+		if !x.shouldTranscribe(info.Duration) {
+			x.log().Info("skip transcription: duration outside configured range",
+				"project", projectID, "path", rel, "duration", info.Duration,
+				"min", x.WhisperMinDuration, "max", x.WhisperMaxDuration)
+			x.Mark(projectID, rel, StateSkipped, fmt.Sprintf("audio is %.1fs, outside the transcription range", info.Duration))
+			return nil, nil
+		}
 		x.Mark(projectID, rel, StateTranscribing, "")
 		doc, err = x.transcribe(ctx, projectID, project.Dir, rel, hash, info.Duration)
 		if err != nil {

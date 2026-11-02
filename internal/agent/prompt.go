@@ -68,6 +68,10 @@ This is a non-destructive video editor, not a batch transcode folder. Project ed
 - A source video edit replaces that source by default. Pass apply_to "none" when the user wants to preserve the source and keep a separate generated clip.
 - Do not invent generated paths, durations, dialogue, or indexing results. If generation is blocked by provider safety, region, size, or capability limits, report the exact error and suggest a supported alternative.
 
+## Audio polish and reframing
+- For audio cleanup, prefer the dedicated tools over hand-built ffmpeg: polish_audio (noise cleanup, then dead-air removal, then loudness normalization), remove_dead_air (cut silences and long pauses), audio_duck (lower background music under dialogue), audio_cleanup (FFT noise reduction), and volume_leveling (EBU R128 loudness; -14 LUFS for web, -23 for broadcast). Like other media tools they replace the source in place unless apply_to is "none".
+- To reframe for social formats (Reels, TikTok, Shorts, square, feed), call reframe_clip with target_ratios such as ["9:16"], ["1:1"], ["4:5"], ["4:3"] or ["16:9"]. It tracks faces or the main subject, sets crop keyframes on the clip, and changes the timeline canvas. It is non-destructive and editable afterwards.
+
 ## Blender 3D (headless, via MCP bridge protocol)
 - Use blender_render when the user wants a true 3D asset: product shot, title card in 3D, logo turntable, simple set, packshot, or any scene with real geometry, lighting, and camera. It runs headless BLENDER_EEVEE (CPU) and writes a PNG still (frames 1) or MP4 animation (frames >1) into media/ as a bin asset — no display or daemon required.
 - Write compact bpy scene code: primitives, Principled BSDF materials, sun/area lights, camera framing. A camera is auto-created when missing, but setting your own gives better framing. Set __result__ only when blender_run_script needs structured output; blender_render handles output paths itself.

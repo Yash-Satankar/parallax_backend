@@ -122,6 +122,9 @@ type Config struct {
 	WhisperPython              string
 	WhisperScript              string
 	WhisperCompute             string
+	// Speech shorter/longer than these seconds is not transcribed. 0 = no limit.
+	WhisperMinDuration float64
+	WhisperMaxDuration float64
 }
 
 // Embedding is a separate OpenAI-compatible /v1/embeddings endpoint.
@@ -227,14 +230,16 @@ func Load() (Config, error) {
 			APIKey:  strings.TrimSpace(os.Getenv("EMBEDDING_API_KEY")),
 			Model:   strings.TrimSpace(os.Getenv("EMBEDDING_MODEL")),
 		},
-		QdrantURL:        strings.TrimRight(envOr("QDRANT_URL", "http://127.0.0.1:6333"), "/"),
-		QdrantAPIKey:     strings.TrimSpace(os.Getenv("QDRANT_API_KEY")),
-		QdrantCollection: envOr("QDRANT_COLLECTION", "parallax_media_v1"),
-		WhisperModel:     envOr("WHISPER_MODEL", "large-v3-turbo"),
-		WhisperDevice:    strings.ToLower(envOr("WHISPER_DEVICE", "auto")),
-		WhisperPython:    resolveExisting(envOr("WHISPER_PYTHON", filepath.Join("scripts", ".venv", "bin", "python")), cwd),
-		WhisperScript:    resolveExisting(envOr("WHISPER_SCRIPT", filepath.Join("scripts", "transcribe.py")), cwd),
-		WhisperCompute:   envOr("WHISPER_COMPUTE", "int8"),
+		QdrantURL:          strings.TrimRight(envOr("QDRANT_URL", "http://127.0.0.1:6333"), "/"),
+		QdrantAPIKey:       strings.TrimSpace(os.Getenv("QDRANT_API_KEY")),
+		QdrantCollection:   envOr("QDRANT_COLLECTION", "parallax_media_v1"),
+		WhisperModel:       envOr("WHISPER_MODEL", "large-v3-turbo"),
+		WhisperDevice:      strings.ToLower(envOr("WHISPER_DEVICE", "auto")),
+		WhisperPython:      resolveExisting(envOr("WHISPER_PYTHON", filepath.Join("scripts", ".venv", "bin", "python")), cwd),
+		WhisperScript:      resolveExisting(envOr("WHISPER_SCRIPT", filepath.Join("scripts", "transcribe.py")), cwd),
+		WhisperCompute:     envOr("WHISPER_COMPUTE", "int8"),
+		WhisperMinDuration: envFloat("WHISPER_MIN_DURATION", 0),
+		WhisperMaxDuration: envFloat("WHISPER_MAX_DURATION", 0),
 	}
 	if cfg.SupabaseIssuer == "" && cfg.SupabaseURL != "" {
 		cfg.SupabaseIssuer = cfg.SupabaseURL + "/auth/v1"
@@ -806,6 +811,18 @@ func envInt(key string, fallback int) int {
 		return fallback
 	}
 	return n
+}
+
+func envFloat(key string, fallback float64) float64 {
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		return fallback
+	}
+	f, err := strconv.ParseFloat(v, 64)
+	if err != nil {
+		return fallback
+	}
+	return f
 }
 
 func envInt64(key string, fallback int64) int64 {
